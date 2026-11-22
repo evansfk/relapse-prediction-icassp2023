@@ -17,9 +17,9 @@
   <img src="assets/methodology.png" width="720" alt="Methodology Overview" />
 </p>
 
-## Data & Privacy
+## Expected Data Format
 
-The clinical wearable dataset used in the paper is protected medical data and is **not included** in this repository. All training, evaluation, and plotting scripts run out of the box via the synthetic generator (`scripts/generate_synthetic_data.py`).
+The clinical wearable dataset used in the paper is protected medical data and is not included in this repository. To run on your own data, provide inputs in the following format:
 
 | Input | Shape / Columns | Description |
 |---|---|---|
@@ -48,8 +48,6 @@ The clinical wearable dataset used in the paper is protected medical data and is
 │   └── utils/                       # IEEE/SciencePlots & Altair figure generators
 └── tests/                           # Pytest unit, figure-export, and smoke tests
 ```
-
-**Implementation notes:** `DeepSurv` and `Neural MTLR` are implemented natively in PyTorch and tree models via `scikit-survival` (replacing unmaintained `pysurvival==0.1.2` for Python ≥ 3.12 while matching architectures and hyperparameters). Upstream SSL bugs (TFC negative consistency term & 25% zeroed time augmentation, commented TS-TCC strong/weak augmentations, and `pat[0, warp]` channel overwrite) are fixed cleanly.
 
 ## Quickstart
 
