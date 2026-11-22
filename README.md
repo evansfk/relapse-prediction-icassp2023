@@ -17,9 +17,14 @@
   <img src="assets/methodology.png" width="720" alt="Methodology Overview" />
 </p>
 
-## Expected Data Format
+## Note on Release & Data Format
 
-The clinical wearable dataset used in the paper is protected medical data and is not included in this repository. To run on your own data, provide inputs in the following format:
+At the time of publication (2023, before capable frontier LLMs), open-sourcing the original research code was impractical for two reasons:
+
+1. **Medical-data privacy risks:** The study used protected medical data, and manually auditing full Git histories, notebook outputs, embedded HTML/JSON plot payloads, checkpoints, logs, paths, and comments for subtle leaks was too risky and time-consuming.
+2. **Multi-repo fragmentation:** Data preprocessing lived in one repo, the upstream repositories of the SSL papers were downloaded and modified locally to ingest our data and export embeddings, and downstream survival analysis ran in a separate notebook repo built on legacy Python 3.7 libraries.
+
+Frontier models made it straightforward to consolidate, modernize, and audit everything into one clean package (verified locally for equivalence against the paper's pipeline and figures). Since the clinical dataset cannot be shared, the goal of this repository is **to let you bring your own wearable time-series data and apply these SSL + survival analysis methods** using the format below:
 
 | Input | Shape / Columns | Description |
 |---|---|---|
