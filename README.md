@@ -6,7 +6,7 @@
 [![Paper PDF](https://img.shields.io/badge/Paper-PDF-B31B1B.svg)](https://robotics.ntua.gr/wp-content/uploads/sites/2/Fekas_ICASSP2023_paper.pdf)
 ![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-blue)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.5%2B-ee4c2c?logo=pytorch&logoColor=white)](https://pytorch.org/)
-[![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v2.json)](https://github.com/astral-sh/uv)
+[![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![mypy](https://img.shields.io/badge/mypy-strict-blue)](https://mypy.readthedocs.io/en/stable/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
