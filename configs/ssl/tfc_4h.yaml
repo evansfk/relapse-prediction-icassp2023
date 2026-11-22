@@ -1,0 +1,24 @@
+# TFC configuration for the 4-hour dataset (L = 240, C = 10)
+# Matches the IEEE ICASSP 2023 4-hour TFC pretraining configuration (Sections 3-4)
+input_channels: 10
+seq_len: 240
+kernel_size: 12
+stride: 2
+final_out_channels: 128
+dropout: 0.4
+projection_hidden_dim: 256
+projection_dim: 128
+temperature: 0.2
+use_cosine_similarity: true
+consistency_weight: 0.5
+jitter_ratio: 0.3
+jitter_scale_ratio: 1.1
+max_seg: 16
+freq_mask_ratio: 0.1
+freq_add_ratio: 0.1
+lr: 0.0003
+betas: [0.9, 0.99]
+weight_decay: 0.0003
+batch_size: 128
+epochs: 100
+seed: 42

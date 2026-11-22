@@ -1,0 +1,77 @@
+[project]
+name = "relapse-prediction"
+version = "0.1.0"
+description = "Relapse Prediction from Long-Term Wearable Data Using Self-Supervised Learning and Survival Analysis (IEEE ICASSP 2023)"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Evangelos Fekas" }]
+requires-python = ">=3.12"
+dependencies = [
+    "altair>=5.4.0",
+    "matplotlib>=3.9.0",
+    "numpy>=2.2.0",
+    "pandas>=2.2.0",
+    "pyyaml>=6.0.0",
+    "scienceplots>=2.1.1",
+    "scikit-learn>=1.5.0",
+    "scikit-survival>=0.23.0",
+    "seaborn>=0.13.0",
+    "torch>=2.5.0",
+    "vl-convert-python>=1.7.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/relapse_prediction"]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.14.0",
+    "pandas-stubs>=2.2.0",
+    "pytest>=8.3.0",
+    "pytorch-metric-learning>=2.8.0",
+    "ruff>=0.9.0",
+    "types-pyyaml>=6.0.0",
+    "types-seaborn>=0.13.2.20261115",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 119
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "COM812",
+    "CPY001",
+    "D107",
+    "N812",
+    "PLR0913",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D103", "INP001", "PLR2004", "PT018", "S101"]
+"scripts/**" = ["INP001", "T201"]
+
+[tool.ruff.lint.isort]
+lines-between-types = 1
+relative-imports-order = "closest-to-furthest"
+split-on-trailing-comma = false
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = true
+line-ending = "auto"
+docstring-code-format = true
+docstring-code-line-length = "dynamic"
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"

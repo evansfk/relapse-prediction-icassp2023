@@ -1,0 +1,63 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+.eggs/
+build/
+dist/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment & secrets
+.env
+.env.*
+*.key
+*.pem
+wandb/
+
+# Private clinical data, checkpoints & generated outputs (NEVER commit)
+/data/
+/datasets/
+/checkpoints/
+/experiments_logs/
+/lightning_logs/
+/logs/
+/outputs/
+/results/
+notebooks/
+*.ipynb
+*.pdf
+*.png
+!/assets/methodology.png
+*.tfevents*
+*events.out.tfevents*
+*.csv
+*.parquet
+*.npy
+*.npz
+*.pkl
+*.pickle
+*.pt
+*.pth
+*.ckpt
+*.h5
+*.hdf5
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
