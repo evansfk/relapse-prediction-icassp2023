@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def _assert_valid_pdf(path: Path) -> None:
+def _assert_valid_pdf(path: Path, /) -> None:
     assert path.exists(), f"Expected PDF at {path}"
     raw = path.read_bytes()
     assert len(raw) > 500

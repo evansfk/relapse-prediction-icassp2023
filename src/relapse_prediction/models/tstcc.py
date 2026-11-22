@@ -14,6 +14,7 @@ from relapse_prediction.config import TSTCCConfig
 from .base import BaseSSLEncoder, build_conv_encoder_blocks
 
 _MIN_TC_SEQ_LEN = 2
+_EXPECTED_NDIM = 3
 
 
 class _FeedForward(nn.Module):
@@ -152,15 +153,28 @@ class TSTCCEncoder(BaseSSLEncoder):
     def embedding_dim(self) -> int:
         return self._embedding_dim
 
+    def _validate_input_shape(self, x: Tensor, /) -> None:
+        expected_tail = (self.config.input_channels, self.config.seq_len)
+        if x.ndim != _EXPECTED_NDIM or x.shape[1:] != expected_tail:
+            msg = (
+                f"TSTCCEncoder expected shape (B, {self.config.input_channels}, {self.config.seq_len}), "
+                f"got {tuple(x.shape)}"
+            )
+            raise ValueError(msg)
+
     @override
     def forward(self, x: Tensor, /) -> Tensor:
         """Return convolutional feature map of shape ``(B, final_out_channels, L_enc)``."""
+        self._validate_input_shape(x)
         out: Tensor = self.conv_encoder(x)
         return out
 
     @override
     def encode(self, x: Tensor, /) -> Tensor:
         """Extract flattened convolutional embeddings of shape ``(B, final_out_channels * L_enc)``."""
+        if x.shape[0] == 0:
+            self._validate_input_shape(x)
+            return x.new_empty((0, self._embedding_dim))
         feat = self.forward(x)
         return feat.reshape(feat.shape[0], -1)
 
@@ -176,26 +190,25 @@ class TemporalContrasting(nn.Module):
         config: :class:`TSTCCConfig` specifying hidden dimensions and prediction horizon.
     """
 
-    def __init__(self, config: TSTCCConfig | None = None, /) -> None:
+    def __init__(self, config: TSTCCConfig, /) -> None:
         super().__init__()
-        cfg = config or TSTCCConfig()
-        self.num_channels = cfg.final_out_channels
-        self.timesteps = cfg.tc_timesteps
+        self.num_channels = config.final_out_channels
+        self.timesteps = config.tc_timesteps
 
-        self.wk = nn.ModuleList([nn.Linear(cfg.tc_hidden_dim, self.num_channels) for _ in range(self.timesteps)])
+        self.wk = nn.ModuleList([nn.Linear(config.tc_hidden_dim, self.num_channels) for _ in range(self.timesteps)])
         self.projection_head = nn.Sequential(
-            nn.Linear(cfg.tc_hidden_dim, self.num_channels // 2),
+            nn.Linear(config.tc_hidden_dim, self.num_channels // 2),
             nn.BatchNorm1d(self.num_channels // 2),
             nn.ReLU(inplace=True),
             nn.Linear(self.num_channels // 2, self.num_channels // 4),
         )
         self.seq_transformer = SeqTransformer(
             patch_size=self.num_channels,
-            dim=cfg.tc_hidden_dim,
-            depth=cfg.transformer_depth,
-            heads=cfg.transformer_heads,
-            mlp_dim=cfg.transformer_mlp_dim,
-            dropout=cfg.transformer_dropout,
+            dim=config.tc_hidden_dim,
+            depth=config.transformer_depth,
+            heads=config.transformer_heads,
+            mlp_dim=config.transformer_mlp_dim,
+            dropout=config.transformer_dropout,
         )
 
     def sample_cutoff(self, seq_len: int, /, *, device: torch.device) -> tuple[int, int]:

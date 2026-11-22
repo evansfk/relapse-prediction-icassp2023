@@ -9,7 +9,7 @@ IEEE ICASSP 2023 Table 2 and Figures 2-3) without heavy external dependencies su
 from __future__ import annotations
 
 from itertools import combinations
-from typing import TYPE_CHECKING, Any, Self
+from typing import TYPE_CHECKING, Self
 
 import numpy as np
 import torch
@@ -122,7 +122,7 @@ class MiniRocketExtractor:
                 mask[k, chosen] = 1.0
             self._channel_weights.append(torch.from_numpy(mask))
 
-    def fit(self, x: NDArray[np.floating[Any]] | Tensor, /) -> Self:
+    def fit(self, x: NDArray[np.floating] | Tensor, /) -> Self:
         """Fit dilation schedule, channel projections, and quantile bias thresholds.
 
         Args:
@@ -134,6 +134,9 @@ class MiniRocketExtractor:
         x_t = torch.as_tensor(x, dtype=torch.float32)
         if x_t.ndim != _EXPECTED_INPUT_NDIM or x_t.shape[0] == 0:
             msg = f"Expected non-empty 3D input (S, C, L), got shape {tuple(x_t.shape)}"
+            raise ValueError(msg)
+        if not bool(torch.isfinite(x_t).all()):
+            msg = "MiniRocketExtractor.fit requires finite input values (found NaN or inf)"
             raise ValueError(msg)
 
         n_samples, n_channels, seq_len = x_t.shape
@@ -156,20 +159,22 @@ class MiniRocketExtractor:
         cal_idx = rng.choice(n_samples, size=n_cal, replace=False)
         x_cal = x_t[cal_idx].to(self.device)
 
-        q_step = 0
         with torch.no_grad():
             for dil_idx, (dilation, count) in enumerate(zip(self._dilations, self._counts_per_dilation, strict=True)):
                 conv_out = self._convolve_dilation(x_cal, dil_idx=dil_idx, dilation=dilation)
+                padding = ((_KERNEL_LENGTH - 1) * dilation) // 2
                 biases_d = torch.empty((_NUM_BASE_KERNELS, count), dtype=torch.float32, device=self.device)
+                quantiles = torch.tensor(
+                    [((j + 1) * _GOLDEN_RATIO) % 1.0 for j in range(count)], dtype=torch.float32, device=self.device
+                )
                 for k in range(_NUM_BASE_KERNELS):
                     sample_i = int(rng.integers(0, n_cal))
-                    vals = conv_out[sample_i, k]
-                    quantiles = torch.tensor(
-                        [((q_step + j + 1) * _GOLDEN_RATIO) % 1.0 for j in range(count)],
-                        dtype=torch.float32,
-                        device=self.device,
+                    is_padded = (dil_idx + k) % 2 == 1
+                    vals = (
+                        conv_out[sample_i, k]
+                        if (is_padded or padding == 0)
+                        else conv_out[sample_i, k, padding:-padding]
                     )
-                    q_step += count
                     biases_d[k] = torch.quantile(vals, quantiles)
                 self._biases.append(biases_d.cpu())
 
@@ -184,12 +189,13 @@ class MiniRocketExtractor:
         padding = ((_KERNEL_LENGTH - 1) * dilation) // 2
         return F.conv1d(x_t, weight, padding=padding, dilation=dilation)
 
-    def _compute_alternating_ppv(self, conv_out: Tensor, bias: Tensor, /, *, dil_idx: int, dilation: int) -> Tensor:
-        """Compute PPV alternating full padded vs. valid interior slices per ``(dil_idx + k) % 2``."""
+    @staticmethod
+    def _compute_alternating_ppv(conv_out: Tensor, bias: Tensor, /, *, dil_idx: int, dilation: int) -> Tensor:
+        """Compute PPV alternating valid interior vs. full padded slices per ``(dil_idx + k) % 2``."""
         batch_len = conv_out.shape[0]
         count = bias.shape[1]
         padding = ((_KERNEL_LENGTH - 1) * dilation) // 2
-        pad_parity = dil_idx % 2
+        pad_parity = 1 - (dil_idx % 2)
         unpad_parity = 1 - pad_parity
 
         ppv = torch.empty((batch_len, _NUM_BASE_KERNELS, count), dtype=conv_out.dtype, device=conv_out.device)
@@ -201,7 +207,7 @@ class MiniRocketExtractor:
         ppv[:, unpad_parity::2] = unpadded_cmp.float().mean(dim=-1)
         return ppv.reshape(batch_len, _NUM_BASE_KERNELS * count)
 
-    def transform(self, x: NDArray[np.floating[Any]] | Tensor, /, *, batch_size: int = 256) -> NDArray[np.float32]:
+    def transform(self, x: NDArray[np.floating] | Tensor, /, *, batch_size: int = 256) -> NDArray[np.float32]:
         """Transform time-series windows ``(S, C, L)`` into MiniRocket PPV features ``(S, F)``.
 
         Args:
@@ -213,7 +219,7 @@ class MiniRocketExtractor:
 
         Raises:
             RuntimeError: If called before :meth:`fit`.
-            ValueError: If input shape does not match fitted ``(C, L)``.
+            ValueError: If input shape does not match fitted ``(C, L)`` or contains ``NaN``/``inf``.
         """
         if not self._fitted:
             msg = "MiniRocketExtractor must be fitted before calling transform()"
@@ -222,6 +228,9 @@ class MiniRocketExtractor:
         x_t = torch.as_tensor(x, dtype=torch.float32)
         if x_t.ndim != _EXPECTED_INPUT_NDIM or x_t.shape[1] != self._n_channels or x_t.shape[2] != self._seq_len:
             msg = f"Expected shape (S, {self._n_channels}, {self._seq_len}), got {tuple(x_t.shape)}"
+            raise ValueError(msg)
+        if not bool(torch.isfinite(x_t).all()):
+            msg = "MiniRocketExtractor.transform requires finite input values (found NaN or inf)"
             raise ValueError(msg)
         if x_t.shape[0] == 0:
             return np.empty((0, self.num_features), dtype=np.float32)
@@ -241,6 +250,6 @@ class MiniRocketExtractor:
 
         return np.concatenate(chunks, axis=0)
 
-    def fit_transform(self, x: NDArray[np.floating[Any]] | Tensor, /, *, batch_size: int = 256) -> NDArray[np.float32]:
+    def fit_transform(self, x: NDArray[np.floating] | Tensor, /, *, batch_size: int = 256) -> NDArray[np.float32]:
         """Fit on ``x`` and return extracted PPV features."""
         return self.fit(x).transform(x, batch_size=batch_size)

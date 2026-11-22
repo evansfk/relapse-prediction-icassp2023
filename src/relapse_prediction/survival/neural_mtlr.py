@@ -8,7 +8,7 @@ and ``l2_smooth`` temporal smoothness regularization on adjacent output time wei
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Literal, Self, override
+from typing import TYPE_CHECKING, Literal, Self, override
 
 import numpy as np
 import torch
@@ -105,6 +105,12 @@ class NeuralMTLRModel(BaseSurvivalModel):
         if bins < _MIN_BINS:
             msg = f"bins must be >= {_MIN_BINS}, got {bins}"
             raise ValueError(msg)
+        if batch_size is not None and batch_size < 1:
+            msg = f"batch_size must be >= 1 or None, got {batch_size}"
+            raise ValueError(msg)
+        if binning not in {"uniform", "quantile"}:
+            msg = f"binning must be 'uniform' or 'quantile', got {binning!r}"
+            raise ValueError(msg)
         self.hidden_units = hidden_units
         self.bins = bins
         self.binning: Literal["uniform", "quantile"] = binning
@@ -154,9 +160,7 @@ class NeuralMTLRModel(BaseSurvivalModel):
         return np.asarray(edges, dtype=np.float64)
 
     @override
-    def fit(
-        self, x: NDArray[np.floating[Any]], /, *, time: NDArray[np.floating[Any]], event: NDArray[np.bool_]
-    ) -> Self:
+    def fit(self, x: NDArray[np.floating], /, *, time: NDArray[np.floating], event: NDArray[np.bool_]) -> Self:
         seed_everything(self.seed)
         x_scaled = self._scaler.fit_transform(np.asarray(x, dtype=np.float64)).astype(np.float32)
         t_arr = np.asarray(time, dtype=np.float64).reshape(-1)
@@ -200,7 +204,7 @@ class NeuralMTLRModel(BaseSurvivalModel):
 
     @override
     def predict_survival(
-        self, x: NDArray[np.floating[Any]], /, *, times: NDArray[np.floating[Any]] | None = None
+        self, x: NDArray[np.floating], /, *, times: NDArray[np.floating] | None = None
     ) -> NDArray[np.float64]:
         if self._net is None:
             msg = "NeuralMTLRModel must be fitted before calling predict methods"

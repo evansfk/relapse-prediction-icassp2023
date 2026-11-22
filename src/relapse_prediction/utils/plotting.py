@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -20,20 +20,16 @@ _MTS_NDIM = 2
 _CHANCE_C_INDEX = 0.5
 
 
-def _validate_mts_input(mts_seq: Sequence[NDArray[np.floating[Any]]], /, *, titles: Sequence[str] | None) -> None:
-    """Validate inputs for :func:`plot_mts`.
-
-    Args:
-        mts_seq: Sequence of 2D arrays with shape ``(num_channels, time_steps)``.
-        titles: Optional column titles matching ``len(mts_seq)``.
-
-    Raises:
-        TypeError: If ``mts_seq`` is not a sequence of NumPy arrays.
-        ValueError: If series count exceeds ``MAX_SERIES``, channel counts disagree,
-            or title count does not match series count.
-    """
-    if not isinstance(mts_seq, Sequence) or not all(isinstance(mts, np.ndarray) for mts in mts_seq):
+def _validate_mts_input(
+    mts_seq: Sequence[NDArray[np.floating]], /, *, titles: Sequence[str] | None, channel_names: Sequence[str] | None
+) -> None:
+    """Validate inputs for :func:`plot_mts` before creating Matplotlib figures."""
+    raw_seq: object = mts_seq
+    if not isinstance(raw_seq, Sequence) or isinstance(raw_seq, (str, bytes)):
         msg = "Expected a sequence of NDArray, e.g., plot_mts([array1, array2], titles=['A', 'B'])."
+        raise TypeError(msg)
+    if not all(isinstance(mts, np.ndarray) for mts in mts_seq):
+        msg = "Expected every item in mts_seq to be a numpy NDArray."
         raise TypeError(msg)
 
     num_series = len(mts_seq)
@@ -41,7 +37,12 @@ def _validate_mts_input(mts_seq: Sequence[NDArray[np.floating[Any]]], /, *, titl
         msg = f"Expected between 1 and {MAX_SERIES} timeseries, got {num_series}."
         raise ValueError(msg)
 
-    n_channels = mts_seq[0].shape[0]
+    first = mts_seq[0]
+    if first.ndim != _MTS_NDIM:
+        msg = f"Timeseries at index 0 must be 2D (C, L), got shape {first.shape}."
+        raise ValueError(msg)
+    n_channels = first.shape[0]
+
     for idx, mts in enumerate(mts_seq):
         if mts.ndim != _MTS_NDIM:
             msg = f"Timeseries at index {idx} must be 2D (C, L), got shape {mts.shape}."
@@ -53,10 +54,13 @@ def _validate_mts_input(mts_seq: Sequence[NDArray[np.floating[Any]]], /, *, titl
     if titles is not None and len(titles) != num_series:
         msg = f"Number of titles ({len(titles)}) does not match number of timeseries ({num_series})."
         raise ValueError(msg)
+    if channel_names is not None and len(channel_names) != n_channels:
+        msg = f"Number of channel_names ({len(channel_names)}) does not match channels ({n_channels})."
+        raise ValueError(msg)
 
 
 def _plot_single_mts(
-    mts: NDArray[np.floating[Any]],
+    mts: NDArray[np.floating],
     axes: list[Axes],
     /,
     *,
@@ -77,7 +81,7 @@ def _plot_single_mts(
 
 
 def plot_mts(
-    mts_seq: Sequence[NDArray[np.floating[Any]]],
+    mts_seq: Sequence[NDArray[np.floating]],
     /,
     *,
     titles: Sequence[str] | None = None,
@@ -95,7 +99,7 @@ def plot_mts(
     Returns:
         The created Matplotlib ``Figure``.
     """
-    _validate_mts_input(mts_seq, titles=titles)
+    _validate_mts_input(mts_seq, titles=titles, channel_names=channel_names)
 
     num_series = len(mts_seq)
     n_channels = mts_seq[0].shape[0]

@@ -22,6 +22,7 @@ Example:
 from __future__ import annotations
 
 import argparse
+import dataclasses
 
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -31,6 +32,7 @@ import matplotlib as mpl
 mpl.use("Agg")
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import torch
 
@@ -73,8 +75,6 @@ from relapse_prediction.utils.paper_figures import (
 )
 
 if TYPE_CHECKING:
-    import numpy as np
-
     from numpy.typing import NDArray
 
 _WINDOW_DURATIONS: tuple[WindowHours, ...] = (4, 8, 12)
@@ -192,7 +192,7 @@ def _run_table3_ablations(
     """Reproduce Paper Table 3 feature importance & static/past-episode covariate ablations."""
     rows: list[dict[str, object]] = []
 
-    def _eval_deepsurv(label: str, emb: NDArray[np.float32], cfg: SurvivalConfig) -> None:
+    def _eval_deepsurv(label: str, emb: NDArray[np.float32], /, *, cfg: SurvivalConfig) -> None:
         model = DeepSurvModel(
             hidden_units=cfg.deepsurv_hidden_units,
             activation=cfg.deepsurv_activation,
@@ -225,25 +225,13 @@ def _run_table3_ablations(
             }
         )
 
-    base_cfg = SurvivalConfig(
-        include_user_id=True,
-        include_static=False,
-        include_past_episodes=False,
-        deepsurv_hidden_units=surv_cfg.deepsurv_hidden_units,
-        deepsurv_epochs=surv_cfg.deepsurv_epochs,
-        seed=seed,
+    base_cfg = dataclasses.replace(
+        surv_cfg, include_user_id=True, include_static=False, include_past_episodes=False, seed=seed
     )
-    _eval_deepsurv("baseline", base_tfc_emb, base_cfg)
+    _eval_deepsurv("baseline", base_tfc_emb, cfg=base_cfg)
 
-    no_id_cfg = SurvivalConfig(
-        include_user_id=False,
-        include_static=False,
-        include_past_episodes=False,
-        deepsurv_hidden_units=surv_cfg.deepsurv_hidden_units,
-        deepsurv_epochs=surv_cfg.deepsurv_epochs,
-        seed=seed,
-    )
-    _eval_deepsurv("- user's-ID", base_tfc_emb, no_id_cfg)
+    no_id_cfg = dataclasses.replace(base_cfg, include_user_id=False)
+    _eval_deepsurv("- user's-ID", base_tfc_emb, cfg=no_id_cfg)
 
     modality_specs = (
         ("- heart rate", "heart_rate"),
@@ -265,19 +253,12 @@ def _run_table3_ablations(
         )
         res_sub = pretrain_tfc(sub_pretext, cfg_sub, device=device)
         emb_sub = extract_embeddings(res_sub.encoder, sub_downstream, device=device)
-        _eval_deepsurv(display_label, emb_sub, base_cfg)
+        _eval_deepsurv(display_label, emb_sub, cfg=base_cfg)
 
     covariate_specs = (("+ st", True, False), ("+ ps, p_ep, ll", False, True), ("+ st, ps, p_ep, ll", True, True))
     for display_label, use_static, use_past in covariate_specs:
-        cov_cfg = SurvivalConfig(
-            include_user_id=True,
-            include_static=use_static,
-            include_past_episodes=use_past,
-            deepsurv_hidden_units=surv_cfg.deepsurv_hidden_units,
-            deepsurv_epochs=surv_cfg.deepsurv_epochs,
-            seed=seed,
-        )
-        _eval_deepsurv(display_label, base_tfc_emb, cov_cfg)
+        cov_cfg = dataclasses.replace(base_cfg, include_static=use_static, include_past_episodes=use_past)
+        _eval_deepsurv(display_label, base_tfc_emb, cfg=cov_cfg)
 
     return compute_ablation_relative_change(pd.DataFrame(rows), baseline_label="baseline")
 
@@ -350,6 +331,7 @@ def _export_person_id_artifacts(
     /,
     *,
     fast: bool,
+    ssl_epochs: int | None,
     minirocket_features: int,
     min_samples: int,
     probe_splits: int,
@@ -360,18 +342,37 @@ def _export_person_id_artifacts(
 ) -> pd.DataFrame:
     """Run 4-hour Person Identification proxy benchmark and export Table 2 & ``identification.pdf``."""
     pid_summaries: dict[str, PersonIDCVSummary] = {}
-    for emb_name, emb_matrix in embeddings_4h.items():
-        if emb_name == "MiniRocket" and not fast:
-            mr_folds = [
-                MiniRocketExtractor(num_features=minirocket_features, device=device, seed=seed + i)
-                .fit(bundle_4h.pretext_x)
-                .transform(bundle_4h.downstream_x)
-                for i in range(probe_splits)
-            ]
-            pid_input: NDArray[np.float32] | list[NDArray[np.float32]] = mr_folds
+    n_ch = int(bundle_4h.pretext_x.shape[1])
+    seq_len = int(bundle_4h.pretext_x.shape[2])
+
+    for emb_name in list(embeddings_4h):
+        emb_matrix = embeddings_4h[emb_name]
+        folds: list[NDArray[np.float32]] | None = None
+        if not fast and probe_splits > 1:
+            folds = [emb_matrix]
+            for i in range(1, probe_splits):
+                tfc_c, tstcc_c, mix_c = _load_ssl_configs(
+                    4, n_channels=n_ch, seq_len=seq_len, fast=fast, ssl_epochs=ssl_epochs, seed=seed + i
+                )
+                if emb_name == "MiniRocket":
+                    folds.append(
+                        MiniRocketExtractor(num_features=minirocket_features, device=device, seed=seed + i)
+                        .fit(bundle_4h.pretext_x)
+                        .transform(bundle_4h.downstream_x)
+                    )
+                elif emb_name == "TFC":
+                    r_t = pretrain_tfc(bundle_4h.pretext_x, tfc_c, device=device)
+                    folds.append(extract_embeddings(r_t.encoder, bundle_4h.downstream_x, device=device))
+                elif emb_name == "TS-TCC":
+                    r_ts = pretrain_tstcc(bundle_4h.pretext_x, tstcc_c, device=device)
+                    folds.append(extract_embeddings(r_ts.encoder, bundle_4h.downstream_x, device=device))
+                else:
+                    r_m = pretrain_mixing_up(bundle_4h.pretext_x, mix_c, device=device)
+                    folds.append(extract_embeddings(r_m.encoder, bundle_4h.downstream_x, device=device))
+            pid_input: NDArray[np.float32] | list[NDArray[np.float32]] = folds
         else:
             pid_input = emb_matrix
-        pid_summaries[emb_name] = run_person_id_evaluation(
+        summary = run_person_id_evaluation(
             pid_input,
             bundle_4h.downstream_user_ids,
             min_samples_per_user=min_samples,
@@ -380,6 +381,10 @@ def _export_person_id_artifacts(
             device=device,
             seed=seed,
         )
+        pid_summaries[emb_name] = summary
+        if folds is not None and summary.per_split_f1:
+            best_fold = int(np.argmax(summary.per_split_f1))
+            embeddings_4h[emb_name] = folds[best_fold]
     table2_df = format_person_id_table(pid_summaries)
     table2_df.to_csv(out_dir / "table2_person_id.csv")
     (out_dir / "table2_person_id.tex").write_text(table2_df.to_latex(), encoding="utf-8")
@@ -438,7 +443,7 @@ def main() -> None:
             seed=args.seed + int(hours),
         )
         bundles[hours] = bundle
-        emb_dict = _extract_all_four_embeddings(
+        embeddings_by_duration[hours] = _extract_all_four_embeddings(
             bundle.pretext_x,
             bundle.downstream_x,
             hours=hours,
@@ -448,8 +453,24 @@ def main() -> None:
             seed=args.seed,
             device=args.device,
         )
-        embeddings_by_duration[hours] = emb_dict
-        for emb_name, emb_matrix in emb_dict.items():
+
+    table2_df = _export_person_id_artifacts(
+        bundles[4],
+        embeddings_by_duration[4],
+        fast=args.fast,
+        ssl_epochs=args.ssl_epochs,
+        minirocket_features=mr_features,
+        min_samples=max(6, int(args.samples_per_user * 0.4)),
+        probe_splits=probe_splits,
+        probe_epochs=probe_epochs,
+        seed=args.seed,
+        device=args.device,
+        out_dir=out_dir,
+    )
+
+    for hours in _WINDOW_DURATIONS:
+        bundle = bundles[hours]
+        for emb_name, emb_matrix in embeddings_by_duration[hours].items():
             bench = run_survival_benchmark(
                 emb_matrix,
                 metadata=bundle.metadata,
@@ -474,19 +495,6 @@ def main() -> None:
         plot_user_sample_distribution(bundle_8h.downstream_user_ids, output_path=out_dir / "identification_dist.pdf")
     )
 
-    table2_df = _export_person_id_artifacts(
-        bundles[4],
-        embeddings_by_duration[4],
-        fast=args.fast,
-        minirocket_features=mr_features,
-        min_samples=max(6, int(args.samples_per_user * 0.4)),
-        probe_splits=probe_splits,
-        probe_epochs=probe_epochs,
-        seed=args.seed,
-        device=args.device,
-        out_dir=out_dir,
-    )
-
     plt.close(plot_per_embedding_comparison(combined_results, output_path=out_dir / "per_embedding.pdf"))
     plt.close(
         plot_per_survival_model_comparison(
@@ -509,20 +517,7 @@ def main() -> None:
         table3_df.set_index("ablation").round(2).to_latex(), encoding="utf-8"
     )
 
-    final_cfg = SurvivalConfig(
-        include_user_id=True,
-        include_static=True,
-        include_past_episodes=True,
-        deepsurv_hidden_units=hidden_units,
-        deepsurv_lr=surv_lr,
-        deepsurv_epochs=surv_epochs,
-        mtlr_hidden_units=hidden_units,
-        mtlr_bins=mtlr_bins,
-        mtlr_lr=surv_lr,
-        mtlr_epochs=surv_epochs,
-        n_trees=n_trees,
-        seed=args.seed,
-    )
+    final_cfg = dataclasses.replace(surv_cfg, include_static=True, include_past_episodes=True)
     _export_final_risk_and_distribution_figures(
         bundle_12h, embeddings_by_duration[12]["TFC"], final_cfg=final_cfg, out_dir=out_dir, device=args.device
     )

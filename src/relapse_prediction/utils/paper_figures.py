@@ -18,17 +18,18 @@ synthetic runs or private clinical datasets:
 from __future__ import annotations
 
 import contextlib
+import functools
+import importlib
 import re
 import shutil
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import altair as alt
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import scienceplots  # noqa: F401 - registers SciencePlots matplotlib styles on import
 import seaborn as sns
 
 if TYPE_CHECKING:
@@ -64,34 +65,40 @@ _DEFAULT_METRIC_ORDER: tuple[str, ...] = ("F1", "Recall", "Precision", "AUPRC", 
 _NEG_LOG_IBS_LABEL = r"$-\log\left(\mathrm{IBS}\right)$"
 _SFMONO_FONT = "SF Mono, DejaVu Sans Mono, Liberation Mono, monospace"
 _SFMONO_THEME_NAME = "icassp2023_sfmono"
-_SFMONO_REGISTERED = False
+
+
+@functools.cache
+def _register_scienceplots_styles() -> None:
+    """Lazily register SciencePlots Matplotlib stylesheets once."""
+    importlib.import_module("scienceplots")
+
+
+@functools.cache
+def _register_sfmono_theme() -> None:
+    """Register the ``sfmono`` Altair theme once."""
+
+    @alt.theme.register(_SFMONO_THEME_NAME, enable=False)
+    def _sfmono_theme() -> alt.theme.ThemeConfig:
+        return {
+            "config": {
+                "title": {"font": _SFMONO_FONT},
+                "axis": {"labelFont": _SFMONO_FONT, "titleFont": _SFMONO_FONT, "labelFontSize": 19, "title": ""},
+                "header": {"labelFont": _SFMONO_FONT, "titleFont": _SFMONO_FONT},
+                "legend": {
+                    "labelFont": _SFMONO_FONT,
+                    "titleFont": _SFMONO_FONT,
+                    "labelFontSize": 19,
+                    "titleFontSize": 19,
+                },
+            }
+        }
 
 
 def _ensure_altair_sfmono_theme() -> None:
     """Register and enable the ``sfmono`` Altair theme matching Paper Figs. 1 and 4."""
-    global _SFMONO_REGISTERED  # noqa: PLW0603
     alt.data_transformers.disable_max_rows()
-    if not _SFMONO_REGISTERED:
-
-        @alt.theme.register(_SFMONO_THEME_NAME, enable=True)
-        def _sfmono_theme() -> alt.theme.ThemeConfig:
-            return {
-                "config": {
-                    "title": {"font": _SFMONO_FONT},
-                    "axis": {"labelFont": _SFMONO_FONT, "titleFont": _SFMONO_FONT, "labelFontSize": 19, "title": ""},
-                    "header": {"labelFont": _SFMONO_FONT, "titleFont": _SFMONO_FONT},
-                    "legend": {
-                        "labelFont": _SFMONO_FONT,
-                        "titleFont": _SFMONO_FONT,
-                        "labelFontSize": 19,
-                        "titleFontSize": 19,
-                    },
-                }
-            }
-
-        _SFMONO_REGISTERED = True
-    else:
-        alt.theme.enable(_SFMONO_THEME_NAME)
+    _register_sfmono_theme()
+    alt.theme.enable(_SFMONO_THEME_NAME)
 
 
 @contextlib.contextmanager
@@ -110,6 +117,7 @@ def ieee_plot_style(
         use_latex: Force LaTeX text rendering (``True``), disable (``False``), or
             auto-detect ``latex`` on ``PATH`` (``None``).
     """
+    _register_scienceplots_styles()
     enable_tex = (shutil.which("latex") is not None) if use_latex is None else use_latex
     styles = ["science", "ieee", "grid"] if enable_tex else ["science", "ieee", "grid", "no-latex"]
     with (
@@ -154,13 +162,13 @@ def save_altair_chart(chart: alt.TopLevelMixin, output_path: str | Path, /, *, p
     return path
 
 
-def _natural_duration_key(label: str) -> tuple[int, str]:
+def _natural_duration_key(label: str, /) -> tuple[int, str]:
     """Sort duration labels such as ``'4-hour Dataset'``, ``'8-hour Dataset'``, ``'12-hour Dataset'``."""
     match = re.search(r"\d+", label)
     return (int(match.group(0)) if match is not None else 0, label)
 
 
-def _format_user_labels(raw_ids: Sequence[object]) -> tuple[dict[str, str], dict[str, int]]:
+def _format_user_labels(raw_ids: Sequence[object], /) -> tuple[dict[str, str], dict[str, int]]:
     """Map raw user identifiers deterministically to ``'User 1' .. 'User N'`` and numeric order."""
     unique_ids: list[str] = []
     seen: set[str] = set()
@@ -179,6 +187,23 @@ def _format_user_labels(raw_ids: Sequence[object]) -> tuple[dict[str, str], dict
     return label_map, order_map
 
 
+def _filter_selected_timeline_users(
+    meta: pd.DataFrame, eps: pd.DataFrame, /, *, selected_users: Sequence[str | int], raw_is_int: bool
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Filter ``(meta, eps)`` to ``selected_users`` without colliding integer IDs vs. 1-based ordinals."""
+    known_raw = set(meta["user_key"].tolist()) | set(eps["user_key"].tolist())
+    keep_keys: set[str] = set()
+    keep_nums: set[int] = set()
+    for item in selected_users:
+        if isinstance(item, int) and not (raw_is_int and str(item) in known_raw):
+            keep_nums.add(item)
+        else:
+            keep_keys.add(str(item))
+    meta_f = meta[meta["user_key"].isin(keep_keys) | meta["index"].isin(keep_keys) | meta["User"].isin(keep_nums)]
+    eps_f = eps[eps["user_key"].isin(keep_keys) | eps["index"].isin(keep_keys) | eps["User"].isin(keep_nums)]
+    return meta_f, eps_f
+
+
 def _build_connector_arrows(sample_df: pd.DataFrame, /) -> pd.DataFrame:
     """Construct horizontal line segments connecting each sample dot to ``next_episode``."""
     rows: list[dict[str, object]] = []
@@ -187,6 +212,8 @@ def _build_connector_arrows(sample_df: pd.DataFrame, /) -> pd.DataFrame:
         user_num = int(row["User"])
         rows.append({"x": row["Days"], "y": seg_id, "class": user_label, "User": user_num})
         rows.append({"x": row["next_episode"], "y": seg_id, "class": user_label, "User": user_num})
+    if not rows:
+        return pd.DataFrame(columns=["x", "y", "class", "User"])
     return pd.DataFrame(rows)
 
 
@@ -227,22 +254,21 @@ def _prepare_timeline_frames(
     else:
         eps["Level"] = "moderate"
 
-    label_map, order_map = _format_user_labels(list(meta["user_key"].tolist()) + list(eps["user_key"].tolist()))
+    canonical_keys = list(eps["user_key"].tolist()) + sorted(
+        set(meta["user_key"].tolist()) - set(eps["user_key"].tolist())
+    )
+    label_map, order_map = _format_user_labels(canonical_keys)
     meta["index"] = meta["user_key"].map(label_map)
     meta["User"] = meta["index"].map(order_map).astype(int)
     eps["index"] = eps["user_key"].map(label_map)
     eps["User"] = eps["index"].map(order_map).astype(int)
 
     if selected_users is not None:
-        keep_keys: set[str] = set()
-        keep_nums: set[int] = set()
-        for item in selected_users:
-            if isinstance(item, int):
-                keep_nums.add(item)
-            else:
-                keep_keys.add(str(item))
-        meta = meta[meta["user_key"].isin(keep_keys) | meta["index"].isin(keep_keys) | meta["User"].isin(keep_nums)]
-        eps = eps[eps["user_key"].isin(keep_keys) | eps["index"].isin(keep_keys) | eps["User"].isin(keep_nums)]
+        meta, eps = _filter_selected_timeline_users(
+            meta, eps, selected_users=selected_users, raw_is_int=pd.api.types.is_integer_dtype(metadata["user_id"])
+        )
+    else:
+        eps = eps[eps["user_key"].isin(set(meta["user_key"].tolist()))]
 
     if max_samples is not None and len(meta) > max_samples:
         meta = meta.sample(n=max_samples, random_state=seed)
@@ -272,7 +298,7 @@ def _normalize_survival_results_frame(
     return df, emb_col, model_col, c_col, nli_col, len_col
 
 
-def _apply_top_shadow_legend(ax: Axes, /, *, ncol: int, y_anchor: float = 1.24) -> None:
+def _apply_top_shadow_legend(ax: Axes, /, *, ncol: int, y_anchor: float) -> None:
     """Place the centered shadowed fancybox legend above the top subplot matching Figs. 2-3."""
     handles, labels = ax.get_legend_handles_labels()
     existing_legend = ax.get_legend()
@@ -679,6 +705,7 @@ def plot_risk_classification_timeline(
                 sort=list(_RISK_DOMAIN),
                 scale=alt.Scale(domain=list(_RISK_DOMAIN), range=[_RISK_TIER_COLORS[k] for k in _RISK_DOMAIN]),
             ),
+            order=alt.Order("risk_sort:Q"),
         )
         .properties(width=width, height=height)
     )
@@ -768,7 +795,7 @@ def plot_person_id_metrics(
 
 
 def plot_user_sample_distribution(
-    user_ids: NDArray[np.integer[Any]] | NDArray[np.str_] | NDArray[np.object_] | Sequence[object],
+    user_ids: NDArray[np.integer] | NDArray[np.str_] | NDArray[np.object_] | Sequence[object],
     /,
     *,
     min_samples_threshold: int | None = None,
@@ -816,9 +843,9 @@ def plot_user_sample_distribution(
 
 def plot_survival_time_distribution(
     *,
-    time_train: NDArray[np.floating[Any]],
+    time_train: NDArray[np.floating],
     event_train: NDArray[np.bool_],
-    time_test: NDArray[np.floating[Any]],
+    time_test: NDArray[np.floating],
     event_test: NDArray[np.bool_],
     bins: int | str = "auto",
     figsize: tuple[float, float] = (14.0, 7.0),
@@ -890,7 +917,7 @@ def plot_survival_time_distribution(
 
 
 def plot_risk_group_histogram(
-    risk_scores: NDArray[np.floating[Any]],
+    risk_scores: NDArray[np.floating],
     risk_labels: NDArray[np.str_] | Sequence[str],
     /,
     *,
@@ -954,10 +981,10 @@ def plot_risk_group_histogram(
 
 def plot_risk_group_survival_curves(
     model: BaseSurvivalModel,
-    x_test: NDArray[np.floating[Any]],
+    x_test: NDArray[np.floating],
     /,
     *,
-    time_test: NDArray[np.floating[Any]],
+    time_test: NDArray[np.floating],
     event_test: NDArray[np.bool_],
     risk_labels: NDArray[np.str_] | Sequence[str],
     seed: int = 42,
@@ -1005,7 +1032,7 @@ def plot_risk_group_survival_curves(
             if len(candidates) == 0:
                 continue
             chosen = int(rng.choice(candidates))
-            surv_curve = model.predict_survival(x_arr[chosen : chosen + 1], times=times).ravel()
+            surv_curve = model.predict_survival(x_arr[chosen : chosen + 1]).ravel()
             color = _RISK_TIER_COLORS[tier]
             ax.plot(times, surv_curve, color=color, linewidth=2.0, label=f"{tier} risk")
             t_obs = float(t_arr[chosen])

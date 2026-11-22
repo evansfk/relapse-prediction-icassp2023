@@ -9,11 +9,13 @@ positional-argument swap hazards.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Literal, assert_never
 
 import numpy as np
 
-from sksurv.metrics import brier_score, concordance_index_censored, integrated_brier_score
+from sksurv.exceptions import NoComparablePairException
+from sksurv.metrics import concordance_index_censored
+from sksurv.nonparametric import CensoringDistributionEstimator
 from sksurv.util import Surv
 
 if TYPE_CHECKING:
@@ -25,7 +27,7 @@ _EPS_TIME = 1e-6
 _MIN_IBS_FLOOR = 1e-12
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class SurvivalMetrics:
     """Discrimination and calibration summary for a survival model."""
 
@@ -37,7 +39,7 @@ class SurvivalMetrics:
     tied_risk_pairs: int
 
 
-def to_structured_survival(*, time: NDArray[np.floating[Any]], event: NDArray[np.bool_]) -> NDArray[np.void]:
+def to_structured_survival(*, time: NDArray[np.floating], event: NDArray[np.bool_]) -> NDArray[np.void]:
     """Convert ``(time, event)`` arrays into a ``scikit-survival`` structured array."""
     structured: NDArray[np.void] = Surv.from_arrays(
         event=np.asarray(event, dtype=bool), time=np.asarray(time, dtype=np.float64)
@@ -46,12 +48,14 @@ def to_structured_survival(*, time: NDArray[np.floating[Any]], event: NDArray[np
 
 
 def compute_c_index(
-    *, time: NDArray[np.floating[Any]], event: NDArray[np.bool_], risk_scores: NDArray[np.floating[Any]]
+    *, time: NDArray[np.floating], event: NDArray[np.bool_], risk_scores: NDArray[np.floating]
 ) -> tuple[float, int, int, int]:
     """Compute Harrell's concordance index (C-index) for right-censored data.
 
-    Matches the formula printed in Section 3: higher ``risk_scores`` correspond to shorter
-    predicted time-to-relapse.
+    Matches the unweighted Harrell concordance formula printed in Section 3: higher
+    ``risk_scores`` correspond to shorter predicted time-to-relapse (whereas ``pysurvival``'s
+    C++ extension cited via Uno et al. [30] weighted pairs by test-set IPCW). Returns ``0.5``
+    if ``event`` contains zero comparable pairs.
 
     Args:
         time: Observed or censored times ``(N,)``.
@@ -61,19 +65,28 @@ def compute_c_index(
     Returns:
         Tuple ``(c_index, concordant, discordant, tied_risk)``.
     """
-    c_idx, concordant, discordant, tied_risk, _ = concordance_index_censored(
-        np.asarray(event, dtype=bool), np.asarray(time, dtype=np.float64), np.asarray(risk_scores, dtype=np.float64)
-    )
+    e_arr = np.asarray(event, dtype=bool)
+    t_arr = np.asarray(time, dtype=np.float64)
+    r_arr = np.asarray(risk_scores, dtype=np.float64)
+    if not bool(np.isfinite(r_arr).all()):
+        msg = "risk_scores must be finite"
+        raise ValueError(msg)
+    if not np.any(e_arr):
+        return 0.5, 0, 0, 0
+    try:
+        c_idx, concordant, discordant, tied_risk, _ = concordance_index_censored(e_arr, t_arr, r_arr)
+    except NoComparablePairException:
+        return 0.5, 0, 0, 0
     return float(c_idx), int(concordant), int(discordant), int(tied_risk)
 
 
 def _valid_eval_times(
-    time_train: NDArray[np.floating[Any]],
-    time_test: NDArray[np.floating[Any]],
+    time_train: NDArray[np.floating],
+    time_test: NDArray[np.floating],
     /,
     *,
     num_points: int,
-    ibs_mode: Literal["paper", "quantile"] = "paper",
+    ibs_mode: Literal["paper", "quantile"],
 ) -> NDArray[np.float64]:
     """Construct an evaluation time grid strictly inside the IPCW support of both train and test."""
     t_tr = np.asarray(time_train, dtype=np.float64)
@@ -101,15 +114,15 @@ def _valid_eval_times(
 
 def compute_ibs_and_brier(
     *,
-    time_train: NDArray[np.floating[Any]],
+    time_train: NDArray[np.floating],
     event_train: NDArray[np.bool_],
-    time_test: NDArray[np.floating[Any]],
+    time_test: NDArray[np.floating],
     event_test: NDArray[np.bool_],
-    survival_probs: NDArray[np.floating[Any]],
-    eval_times: NDArray[np.floating[Any]],
+    survival_probs: NDArray[np.floating],
+    eval_times: NDArray[np.floating],
     ibs_mode: Literal["paper", "quantile"] = "paper",
 ) -> tuple[float, float, NDArray[np.float64]]:
-    """Compute IPCW Brier Scores, Integrated Brier Score (IBS), and ``-log(IBS)``.
+    """Compute Graf et al. (1999) IPCW Brier Scores, Integrated Brier Score (IBS), and ``-log(IBS)``.
 
     Args:
         time_train: Training event/censoring times.
@@ -117,7 +130,7 @@ def compute_ibs_and_brier(
         time_test: Test event/censoring times.
         event_test: Test event indicators.
         survival_probs: Predicted survival probabilities ``S(t | x)`` of shape ``(N_test, len(eval_times))``.
-        eval_times: Strictly increasing evaluation time points.
+        eval_times: Strictly increasing evaluation time points ``< max(time_train)``.
         ibs_mode: ``"paper"`` integrates ``(1 / t_max) * int_0^{t_max} BS(t) dt`` matching
             Paper Section 3 and ``pysurvival`` (anchoring ``BS(0) = 0`` at ``t = 0``);
             ``"quantile"`` normalizes over ``eval_times[-1] - eval_times[0]``.
@@ -125,47 +138,63 @@ def compute_ibs_and_brier(
     Returns:
         Tuple ``(ibs, neg_log_ibs, brier_curve)``.
     """
-    t_tr = np.asarray(time_train, dtype=np.float64)
-    t_te = np.asarray(time_test, dtype=np.float64)
-    e_te = np.asarray(event_test, dtype=bool)
-    times_arr = np.asarray(eval_times, dtype=np.float64)
-
-    # Administratively censor test subjects observed at/beyond max(time_train):
-    # sksurv's CensoringDistributionEstimator requires every test_time < max(time_train),
-    # while for any eval time t < max(time_train) a subject with T_i >= max(time_train) is
-    # identically still event-free (1_{T_i > t} == 1, 1_{T_i <= t} == 0).
-    max_tr = float(np.max(t_tr))
-    if float(times_arr.max()) < max_tr:
-        exceeds = t_te >= max_tr
-        if np.any(exceeds):
-            admin_censor_time = 0.5 * (float(times_arr.max()) + max_tr)
-            t_te = np.where(exceeds, admin_censor_time, t_te)
-            e_te = e_te & ~exceeds
-
-    y_tr = to_structured_survival(time=t_tr, event=event_train)
-    y_te = to_structured_survival(time=t_te, event=e_te)
+    t_tr = np.asarray(time_train, dtype=np.float64).reshape(-1)
+    t_te = np.asarray(time_test, dtype=np.float64).reshape(-1)
+    e_te = np.asarray(event_test, dtype=bool).reshape(-1)
+    times_arr = np.asarray(eval_times, dtype=np.float64).reshape(-1)
     surv_clipped = np.clip(np.asarray(survival_probs, dtype=np.float64), 0.0, 1.0)
 
-    _, scores_raw = brier_score(y_tr, y_te, surv_clipped, times_arr)
-    scores = np.asarray(scores_raw, dtype=np.float64)
+    if len(times_arr) == 0 or float(times_arr.min()) < 0.0:
+        msg = "eval_times must be non-empty and non-negative"
+        raise ValueError(msg)
+    max_tr = float(np.max(t_tr))
+    if float(times_arr.max()) >= max_tr:
+        msg = f"eval_times must lie strictly below max(time_train)={max_tr}, got max={times_arr.max()}"
+        raise ValueError(msg)
+    if surv_clipped.shape != (len(t_te), len(times_arr)):
+        msg = f"Expected survival_probs shape {(len(t_te), len(times_arr))}, got {surv_clipped.shape}"
+        raise ValueError(msg)
+
+    y_tr = to_structured_survival(time=t_tr, event=event_train)
+    cens_est = CensoringDistributionEstimator().fit(y_tr)
+
+    # Evaluate G_hat(t) at every eval_time and G_hat(T_i) at uncensored test event times < max(t_tr).
+    g_eval = np.maximum(np.asarray(cens_est.predict_proba(times_arr), dtype=np.float64), _MIN_IBS_FLOOR)
+    obs_event_mask = e_te & (t_te < max_tr)
+    g_subj = np.ones(len(t_te), dtype=np.float64)
+    if np.any(obs_event_mask):
+        g_subj[obs_event_mask] = np.maximum(
+            np.asarray(cens_est.predict_proba(t_te[obs_event_mask]), dtype=np.float64), _MIN_IBS_FLOOR
+        )
+
+    # Weight uncensored events by 1 / G_hat(T_i) and still-at-risk subjects by 1 / G_hat(t_k) (Graf et al., 1999).
+    event_by_t = (t_te[:, np.newaxis] <= times_arr[np.newaxis, :]) & e_te[:, np.newaxis]
+    at_risk_after_t = t_te[:, np.newaxis] > times_arr[np.newaxis, :]
+    term_event = np.where(event_by_t, (surv_clipped**2) / g_subj[:, np.newaxis], 0.0)
+    term_surv = np.where(at_risk_after_t, ((1.0 - surv_clipped) ** 2) / g_eval[np.newaxis, :], 0.0)
+    scores = np.asarray(np.mean(term_event + term_surv, axis=0), dtype=np.float64)
+
     if ibs_mode == "paper":
         t_with_zero = np.concatenate([[0.0], times_arr])
         bs_with_zero = np.concatenate([[0.0], scores])
         ibs_val = float(np.trapezoid(bs_with_zero, t_with_zero) / max(float(times_arr[-1]), _EPS_TIME))
+    elif ibs_mode == "quantile":
+        span = float(times_arr[-1] - times_arr[0])
+        ibs_val = float(np.trapezoid(scores, times_arr) / span) if span > _EPS_TIME else float(np.mean(scores))
     else:
-        ibs_val = float(integrated_brier_score(y_tr, y_te, surv_clipped, times_arr))
+        assert_never(ibs_mode)
     neg_log_ibs = float(-np.log(max(ibs_val, _MIN_IBS_FLOOR)))
     return ibs_val, neg_log_ibs, scores
 
 
 def evaluate_survival_model(
     model: BaseSurvivalModel,
-    x_test: NDArray[np.floating[Any]],
+    x_test: NDArray[np.floating],
     /,
     *,
-    time_train: NDArray[np.floating[Any]],
+    time_train: NDArray[np.floating],
     event_train: NDArray[np.bool_],
-    time_test: NDArray[np.floating[Any]],
+    time_test: NDArray[np.floating],
     event_test: NDArray[np.bool_],
     num_time_points: int = 50,
     ibs_mode: Literal["paper", "quantile"] = "paper",
@@ -212,7 +241,7 @@ def evaluate_survival_model(
 
 
 def stratify_risk_groups(
-    risk_scores: NDArray[np.floating[Any]],
+    risk_scores: NDArray[np.floating],
     /,
     *,
     quantiles: tuple[float, float] = (1.0 / 3.0, 2.0 / 3.0),
@@ -233,10 +262,13 @@ def stratify_risk_groups(
         ``{"low", "medium", "high"}``.
     """
     scores = np.asarray(risk_scores, dtype=np.float64).reshape(-1)
+    if not bool(np.isfinite(scores).all()):
+        msg = "risk_scores must contain only finite values"
+        raise ValueError(msg)
     if cutoffs is not None:
         low_cut, high_cut = float(cutoffs[0]), float(cutoffs[1])
-        if high_cut < low_cut:
-            msg = f"Expected low_cut <= high_cut, got {cutoffs}"
+        if not np.isfinite(low_cut) or not np.isfinite(high_cut) or high_cut < low_cut:
+            msg = f"Expected finite low_cut <= high_cut, got {cutoffs}"
             raise ValueError(msg)
     else:
         q_low, q_high = quantiles

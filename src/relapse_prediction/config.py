@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Self
@@ -35,7 +37,14 @@ CHANNEL_GROUPS: dict[str, tuple[int, ...]] = {
     "hour_of_day": (8, 9),
 }
 
-_TUPLE_FIELDS: frozenset[str] = frozenset({"betas", "hidden_channels", "kernel_sizes", "dilations", "risk_quantiles"})
+_TUPLE_SIZES: dict[str, int] = {
+    "betas": 2,
+    "risk_quantiles": 2,
+    "hidden_channels": 3,
+    "kernel_sizes": 3,
+    "dilations": 3,
+}
+_MIN_TC_CHANNELS = 4
 
 
 def select_channel_indices(exclude_groups: Sequence[str] = (), /) -> list[int]:
@@ -62,7 +71,23 @@ def select_channel_indices(exclude_groups: Sequence[str] = (), /) -> list[int]:
     return [idx for idx in range(len(CHANNEL_NAMES)) if idx not in excluded]
 
 
-@dataclass
+def _coerce_yaml_value(field_name: str, field_type: str, val: object, /) -> object:
+    """Coerce YAML 1.1 scientific-notation strings and validate tuple-field lengths."""
+    if field_name in _TUPLE_SIZES and isinstance(val, (list, tuple)):
+        expected_len = _TUPLE_SIZES[field_name]
+        if len(val) != expected_len:
+            msg = f"Expected {expected_len} elements for {field_name!r}, got {len(val)}"
+            raise ValueError(msg)
+        elem_is_int = "int" in field_type
+        return tuple(int(v) if elem_is_int else float(v) for v in val)
+    if isinstance(val, str) and field_type.startswith("float"):
+        return float(val)
+    if isinstance(val, int) and not isinstance(val, bool) and field_type.startswith("float"):
+        return float(val)
+    return val
+
+
+@dataclass(slots=True, kw_only=True)
 class BaseConfig:
     """Base configuration supporting YAML deserialization with schema validation."""
 
@@ -77,7 +102,7 @@ class BaseConfig:
             Populated configuration instance.
 
         Raises:
-            ValueError: If the YAML root is not a mapping or contains unknown keys.
+            ValueError: If the YAML root is not a mapping or contains unknown/invalid keys.
         """
         loaded = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
         if loaded is None:
@@ -97,14 +122,11 @@ class BaseConfig:
         coerced: dict[str, Any] = {}
         for f in fields(cls):
             if f.name in raw:
-                val = raw[f.name]
-                if f.name in _TUPLE_FIELDS and isinstance(val, list):
-                    val = tuple(val)
-                coerced[f.name] = val
+                coerced[f.name] = _coerce_yaml_value(f.name, str(f.type), raw[f.name])
         return cls(**coerced)
 
 
-@dataclass
+@dataclass(slots=True, kw_only=True)
 class TFCConfig(BaseConfig):
     """Hyperparameters for Time-Frequency Consistency (TFC) SSL pretraining.
 
@@ -137,8 +159,20 @@ class TFCConfig(BaseConfig):
     epochs: int = 100
     seed: int = 42
 
+    def __post_init__(self) -> None:
+        """Validate TFC hyperparameters."""
+        if self.consistency_mode not in {"tf", "clamped_margin"}:
+            msg = f"consistency_mode must be 'tf' or 'clamped_margin', got {self.consistency_mode!r}"
+            raise ValueError(msg)
+        if not math.isfinite(self.temperature) or self.temperature <= 0 or not math.isfinite(self.lr) or self.lr <= 0:
+            msg = f"temperature and lr must be finite > 0, got temperature={self.temperature}, lr={self.lr}"
+            raise ValueError(msg)
+        if self.input_channels < 1 or self.seq_len < 1 or self.epochs < 1 or self.batch_size < 1:
+            msg = "input_channels, seq_len, epochs, and batch_size must be >= 1"
+            raise ValueError(msg)
 
-@dataclass
+
+@dataclass(slots=True, kw_only=True)
 class TSTCCConfig(BaseConfig):
     """Hyperparameters for Temporal and Contextual Contrasting (TS-TCC) SSL pretraining.
 
@@ -173,8 +207,20 @@ class TSTCCConfig(BaseConfig):
     epochs: int = 200
     seed: int = 42
 
+    def __post_init__(self) -> None:
+        """Validate TS-TCC hyperparameters."""
+        if self.tc_timesteps < 1 or self.final_out_channels < _MIN_TC_CHANNELS:
+            msg = f"tc_timesteps must be >= 1 and final_out_channels >= {_MIN_TC_CHANNELS}"
+            raise ValueError(msg)
+        if not math.isfinite(self.temperature) or self.temperature <= 0 or not math.isfinite(self.lr) or self.lr <= 0:
+            msg = f"temperature and lr must be finite > 0, got temperature={self.temperature}, lr={self.lr}"
+            raise ValueError(msg)
+        if self.input_channels < 1 or self.seq_len < 1 or self.epochs < 1 or self.batch_size < 1:
+            msg = "input_channels, seq_len, epochs, and batch_size must be >= 1"
+            raise ValueError(msg)
 
-@dataclass
+
+@dataclass(slots=True, kw_only=True)
 class MixingUpConfig(BaseConfig):
     """Hyperparameters for Mixing-Up Contrastive Learning SSL pretraining.
 
@@ -195,8 +241,28 @@ class MixingUpConfig(BaseConfig):
     epochs: int = 50
     seed: int = 42
 
+    def __post_init__(self) -> None:
+        """Validate Mixing-Up hyperparameters."""
+        if (
+            not math.isfinite(self.alpha)
+            or self.alpha <= 0
+            or not math.isfinite(self.temperature)
+            or self.temperature <= 0
+        ):
+            msg = f"alpha and temperature must be finite > 0, got alpha={self.alpha}, temperature={self.temperature}"
+            raise ValueError(msg)
+        if (
+            not math.isfinite(self.lr)
+            or self.lr <= 0
+            or self.input_channels < 1
+            or self.epochs < 1
+            or self.batch_size < 1
+        ):
+            msg = "lr must be > 0 and input_channels, epochs, batch_size >= 1"
+            raise ValueError(msg)
 
-@dataclass
+
+@dataclass(slots=True, kw_only=True)
 class SurvivalConfig(BaseConfig):
     """Hyperparameters for downstream survival analysis and evaluation (Sections 3-4).
 
@@ -236,3 +302,18 @@ class SurvivalConfig(BaseConfig):
     max_samples: float | None = 0.63
     risk_quantiles: tuple[float, float] = (1.0 / 3.0, 2.0 / 3.0)
     seed: int = 42
+
+    def __post_init__(self) -> None:
+        """Validate survival configuration literals and split bounds."""
+        if not (0.0 < self.test_size < 1.0):
+            msg = f"test_size must lie strictly in (0, 1), got {self.test_size}"
+            raise ValueError(msg)
+        if self.ibs_mode not in {"paper", "quantile"}:
+            msg = f"ibs_mode must be 'paper' or 'quantile', got {self.ibs_mode!r}"
+            raise ValueError(msg)
+        if self.deepsurv_activation not in {"tanh", "relu"} or self.mtlr_activation not in {"tanh", "relu"}:
+            msg = "deepsurv_activation and mtlr_activation must be 'tanh' or 'relu'"
+            raise ValueError(msg)
+        if self.mtlr_binning not in {"uniform", "quantile"}:
+            msg = f"mtlr_binning must be 'uniform' or 'quantile', got {self.mtlr_binning!r}"
+            raise ValueError(msg)

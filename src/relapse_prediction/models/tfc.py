@@ -13,6 +13,8 @@ from relapse_prediction.data.datasets import compute_fft_magnitude
 
 from .base import BaseSSLEncoder, build_conv_encoder_blocks
 
+_EXPECTED_NDIM = 3
+
 
 class TFCModel(BaseSSLEncoder):
     """Dual time-domain and frequency-domain contrastive encoder for TFC.
@@ -85,6 +87,18 @@ class TFCModel(BaseSSLEncoder):
         Returns:
             Tuple ``(h_time, z_time, h_freq, z_freq)``.
         """
+        expected_tail = (self.config.input_channels, self.config.seq_len)
+        if (
+            x_in_t.ndim != _EXPECTED_NDIM
+            or x_in_f.ndim != _EXPECTED_NDIM
+            or x_in_t.shape[1:] != expected_tail
+            or x_in_f.shape != x_in_t.shape
+        ):
+            msg = (
+                f"TFCModel expected matching 3D inputs (B, {self.config.input_channels}, {self.config.seq_len}), "
+                f"got {tuple(x_in_t.shape)} and {tuple(x_in_f.shape)}"
+            )
+            raise ValueError(msg)
         h_time: Tensor = self.time_encoder(x_in_t).reshape(x_in_t.shape[0], -1)
         z_time: Tensor = self.projector_t(h_time)
 

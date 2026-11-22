@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, override
+from typing import TYPE_CHECKING, override
 
 import torch
 import torch.nn.functional as F
@@ -38,7 +38,7 @@ class LinearProbe(nn.Module):
         return logits
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class LinearProbeResult:
     """Trained probe and validation/test metrics."""
 
@@ -50,12 +50,12 @@ class LinearProbeResult:
 
 def train_linear_probe(
     *,
-    x_train: NDArray[np.floating[Any]] | Tensor,
-    y_train: NDArray[np.integer[Any]] | Tensor,
-    x_val: NDArray[np.floating[Any]] | Tensor,
-    y_val: NDArray[np.integer[Any]] | Tensor,
-    x_test: NDArray[np.floating[Any]] | Tensor,
-    y_test: NDArray[np.integer[Any]] | Tensor,
+    x_train: NDArray[np.floating] | Tensor,
+    y_train: NDArray[np.integer] | Tensor,
+    x_val: NDArray[np.floating] | Tensor,
+    y_val: NDArray[np.integer] | Tensor,
+    x_test: NDArray[np.floating] | Tensor,
+    y_test: NDArray[np.integer] | Tensor,
     num_classes: int,
     epochs: int = 100,
     batch_size: int = 64,
@@ -91,10 +91,10 @@ def train_linear_probe(
     dev = torch.device(device)
     x_tr = torch.as_tensor(x_train, dtype=torch.float32)
     y_tr = torch.as_tensor(y_train, dtype=torch.long)
-    x_v = torch.as_tensor(x_val, dtype=torch.float32)
-    y_v = torch.as_tensor(y_val, dtype=torch.long)
-    x_te = torch.as_tensor(x_test, dtype=torch.float32)
-    y_te = torch.as_tensor(y_test, dtype=torch.long)
+    x_v_dev = torch.as_tensor(x_val, dtype=torch.float32, device=dev)
+    y_v_np = torch.as_tensor(y_val, dtype=torch.long).numpy()
+    x_te_dev = torch.as_tensor(x_test, dtype=torch.float32, device=dev)
+    y_te_np = torch.as_tensor(y_test, dtype=torch.long).numpy()
 
     gen = torch.Generator()
     gen.manual_seed(seed)
@@ -123,9 +123,9 @@ def train_linear_probe(
 
         model.eval()
         with torch.no_grad():
-            val_logits: Tensor = model(x_v.to(dev))
+            val_logits: Tensor = model(x_v_dev)
             val_probs = F.softmax(val_logits, dim=-1).cpu().numpy()
-        val_m = compute_classification_metrics(y_v.numpy(), val_probs, num_classes=num_classes)
+        val_m = compute_classification_metrics(y_v_np, val_probs, num_classes=num_classes)
 
         if val_m.macro_f1 > best_f1:
             best_f1 = val_m.macro_f1
@@ -140,14 +140,14 @@ def train_linear_probe(
     model.load_state_dict(best_state)
     model.eval()
     with torch.no_grad():
-        val_out: Tensor = model(x_v.to(dev))
-        test_out: Tensor = model(x_te.to(dev))
+        val_out: Tensor = model(x_v_dev)
+        test_out: Tensor = model(x_te_dev)
         val_probs = F.softmax(val_out, dim=-1).cpu().numpy()
         test_probs = F.softmax(test_out, dim=-1).cpu().numpy()
 
     return LinearProbeResult(
         model=model,
-        val_metrics=compute_classification_metrics(y_v.numpy(), val_probs, num_classes=num_classes),
-        test_metrics=compute_classification_metrics(y_te.numpy(), test_probs, num_classes=num_classes),
+        val_metrics=compute_classification_metrics(y_v_np, val_probs, num_classes=num_classes),
+        test_metrics=compute_classification_metrics(y_te_np, test_probs, num_classes=num_classes),
         best_epoch=best_epoch,
     )

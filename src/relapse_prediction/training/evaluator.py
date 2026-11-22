@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 _MIN_CLASSES = 2
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class PersonIDCVSummary:
     """Aggregated Person Identification metrics across folds/seeds (Table 2)."""
 
@@ -45,19 +45,19 @@ class PersonIDCVSummary:
     macro_auprc_std: float
     per_split_f1: list[float]
     per_split_auprc: list[float]
-    accuracy_mean: float = 0.0
-    accuracy_std: float = 0.0
-    macro_precision_mean: float = 0.0
-    macro_precision_std: float = 0.0
-    macro_recall_mean: float = 0.0
-    macro_recall_std: float = 0.0
-    macro_auroc_mean: float = 0.0
-    macro_auroc_std: float = 0.0
+    accuracy_mean: float
+    accuracy_std: float
+    macro_precision_mean: float
+    macro_precision_std: float
+    macro_recall_mean: float
+    macro_recall_std: float
+    macro_auroc_mean: float
+    macro_auroc_std: float
 
 
 def run_person_id_evaluation(
-    embeddings: NDArray[np.floating[Any]] | Sequence[NDArray[np.floating[Any]]],
-    user_ids: NDArray[np.integer[Any]] | NDArray[np.str_] | NDArray[np.object_],
+    embeddings: NDArray[np.floating] | Sequence[NDArray[np.floating]],
+    user_ids: NDArray[np.integer] | NDArray[np.str_] | NDArray[np.object_],
     /,
     *,
     min_samples_per_user: int = 100,
@@ -131,8 +131,14 @@ def run_person_id_evaluation(
         x_tr, x_tmp, y_tr, y_tmp = train_test_split(
             x_filt, y_filt, test_size=1.0 - train_ratio, stratify=y_filt, random_state=split_seed
         )
+        inner_counts = np.bincount(y_tmp, minlength=num_classes)
+        inner_strat = y_tmp if int(inner_counts.min()) >= _MIN_CLASSES else None
         x_val, x_te, y_val, y_te = train_test_split(
-            x_tmp, y_tmp, test_size=test_ratio / (test_ratio + val_ratio), stratify=y_tmp, random_state=split_seed
+            x_tmp,
+            y_tmp,
+            test_size=test_ratio / (test_ratio + val_ratio),
+            stratify=inner_strat,
+            random_state=split_seed,
         )
 
         probe_res = train_linear_probe(
@@ -159,24 +165,26 @@ def run_person_id_evaluation(
         if m.macro_auroc is not None:
             auroc_scores.append(m.macro_auroc)
 
+    ddof = 1 if len(f1_scores) > 1 else 0
+    ddof_auroc = 1 if len(auroc_scores) > 1 else 0
     return PersonIDCVSummary(
         n_users_retained=num_classes,
         n_samples_retained=len(y_filt),
         n_splits=n_splits,
         macro_f1_mean=float(np.mean(f1_scores)),
-        macro_f1_std=float(np.std(f1_scores)),
+        macro_f1_std=float(np.std(f1_scores, ddof=ddof)),
         macro_auprc_mean=float(np.mean(auprc_scores)),
-        macro_auprc_std=float(np.std(auprc_scores)),
+        macro_auprc_std=float(np.std(auprc_scores, ddof=ddof)),
         per_split_f1=f1_scores,
         per_split_auprc=auprc_scores,
         accuracy_mean=float(np.mean(acc_scores)),
-        accuracy_std=float(np.std(acc_scores)),
+        accuracy_std=float(np.std(acc_scores, ddof=ddof)),
         macro_precision_mean=float(np.mean(prec_scores)),
-        macro_precision_std=float(np.std(prec_scores)),
+        macro_precision_std=float(np.std(prec_scores, ddof=ddof)),
         macro_recall_mean=float(np.mean(rec_scores)),
-        macro_recall_std=float(np.std(rec_scores)),
+        macro_recall_std=float(np.std(rec_scores, ddof=ddof)),
         macro_auroc_mean=float(np.mean(auroc_scores)) if auroc_scores else 0.0,
-        macro_auroc_std=float(np.std(auroc_scores)) if auroc_scores else 0.0,
+        macro_auroc_std=float(np.std(auroc_scores, ddof=ddof_auroc)) if auroc_scores else 0.0,
     )
 
 
@@ -258,57 +266,54 @@ def compute_ablation_relative_change(
     )
 
 
-def build_default_survival_models(
-    config: SurvivalConfig | None = None, /, *, device: str | torch.device = "cpu"
-) -> list[BaseSurvivalModel]:
+def build_default_survival_models(config: SurvivalConfig, /, *, device: str | torch.device) -> list[BaseSurvivalModel]:
     """Instantiate the four survival models benchmarked in Section 4 (Figs. 2-3)."""
-    cfg = config or SurvivalConfig()
     return [
         RandomSurvivalForestModel(
-            n_estimators=cfg.n_trees,
-            max_depth=cfg.max_depth,
-            min_samples_leaf=cfg.min_samples_leaf,
-            max_samples=cfg.max_samples,
+            n_estimators=config.n_trees,
+            max_depth=config.max_depth,
+            min_samples_leaf=config.min_samples_leaf,
+            max_samples=config.max_samples,
             n_jobs=1,
-            seed=cfg.seed,
+            seed=config.seed,
         ),
         ExtraSurvivalTreesModel(
-            n_estimators=cfg.n_trees,
-            max_depth=cfg.max_depth,
-            min_samples_leaf=cfg.min_samples_leaf,
-            max_samples=cfg.max_samples,
+            n_estimators=config.n_trees,
+            max_depth=config.max_depth,
+            min_samples_leaf=config.min_samples_leaf,
+            max_samples=config.max_samples,
             n_jobs=1,
-            seed=cfg.seed,
+            seed=config.seed,
         ),
         NeuralMTLRModel(
-            hidden_units=cfg.mtlr_hidden_units,
-            bins=cfg.mtlr_bins,
-            binning=cfg.mtlr_binning,
-            l2_smooth=cfg.mtlr_l2_smooth,
-            activation=cfg.mtlr_activation,
-            dropout=cfg.mtlr_dropout,
-            lr=cfg.mtlr_lr,
-            weight_decay=cfg.mtlr_weight_decay,
-            epochs=cfg.mtlr_epochs,
-            batch_size=cfg.mtlr_batch_size,
+            hidden_units=config.mtlr_hidden_units,
+            bins=config.mtlr_bins,
+            binning=config.mtlr_binning,
+            l2_smooth=config.mtlr_l2_smooth,
+            activation=config.mtlr_activation,
+            dropout=config.mtlr_dropout,
+            lr=config.mtlr_lr,
+            weight_decay=config.mtlr_weight_decay,
+            epochs=config.mtlr_epochs,
+            batch_size=config.mtlr_batch_size,
             device=device,
-            seed=cfg.seed,
+            seed=config.seed,
         ),
         DeepSurvModel(
-            hidden_units=cfg.deepsurv_hidden_units,
-            activation=cfg.deepsurv_activation,
-            dropout=cfg.deepsurv_dropout,
-            lr=cfg.deepsurv_lr,
-            weight_decay=cfg.deepsurv_weight_decay,
-            epochs=cfg.deepsurv_epochs,
-            batch_size=cfg.deepsurv_batch_size,
+            hidden_units=config.deepsurv_hidden_units,
+            activation=config.deepsurv_activation,
+            dropout=config.deepsurv_dropout,
+            lr=config.deepsurv_lr,
+            weight_decay=config.deepsurv_weight_decay,
+            epochs=config.deepsurv_epochs,
+            batch_size=config.deepsurv_batch_size,
             device=device,
-            seed=cfg.seed,
+            seed=config.seed,
         ),
     ]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class SurvivalBenchmarkResult:
     """Results DataFrame, fitted models, split indices, and assembled train/test covariates."""
 
@@ -321,11 +326,11 @@ class SurvivalBenchmarkResult:
 
 
 def run_survival_benchmark(
-    embeddings: NDArray[np.floating[Any]],
+    embeddings: NDArray[np.floating],
     /,
     *,
     metadata: pd.DataFrame,
-    time_days: NDArray[np.floating[Any]],
+    time_days: NDArray[np.floating],
     event: NDArray[np.bool_],
     embedding_name: str = "TFC",
     window_hours: WindowHours | None = None,
@@ -353,9 +358,15 @@ def run_survival_benchmark(
     """
     cfg = config or SurvivalConfig()
     n_samples = len(embeddings)
+    e_arr = np.asarray(event, dtype=bool).reshape(-1)
+    t_arr = np.asarray(time_days, dtype=np.float64).reshape(-1)
+    if len(metadata) != n_samples or len(t_arr) != n_samples or len(e_arr) != n_samples:
+        msg = (
+            f"Row count mismatch: embeddings={n_samples}, metadata={len(metadata)}, "
+            f"time_days={len(t_arr)}, event={len(e_arr)}"
+        )
+        raise ValueError(msg)
     all_indices = np.arange(n_samples, dtype=np.int64)
-    e_arr = np.asarray(event, dtype=bool)
-    t_arr = np.asarray(time_days, dtype=np.float64)
 
     stratify_arr = e_arr if (np.sum(e_arr) >= _MIN_CLASSES and np.sum(~e_arr) >= _MIN_CLASSES) else None
     train_idx, test_idx = train_test_split(

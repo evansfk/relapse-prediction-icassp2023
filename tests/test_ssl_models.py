@@ -147,9 +147,16 @@ def test_all_yaml_configs_load_cleanly_and_coerce_tuples(tmp_path: Path) -> None
         cfg = TFCConfig.from_yaml(CONFIGS_DIR / "ssl" / name)
         assert cfg.input_channels == 10
         assert isinstance(cfg.betas, tuple)
+        assert isinstance(cfg.lr, float)
+    # Regression B-H4: YAML 1.1 dotless scientific notation ("3e-4") must parse as float, not str.
+    cfg_4h = TFCConfig.from_yaml(CONFIGS_DIR / "ssl" / "tfc_4h.yaml")
+    assert isinstance(cfg_4h.lr, float)
+    assert cfg_4h.lr == pytest.approx(3e-4)
+
     for name in ["tstcc_4h.yaml", "tstcc_8h.yaml", "tstcc_12h.yaml"]:
         cfg_t = TSTCCConfig.from_yaml(CONFIGS_DIR / "ssl" / name)
         assert cfg_t.input_channels == 10
+        assert isinstance(cfg_t.lr, float)
     cfg_m = MixingUpConfig.from_yaml(CONFIGS_DIR / "ssl" / "mixing_up.yaml")
     assert cfg_m.projection_dim == 128
     cfg_s = SurvivalConfig.from_yaml(CONFIGS_DIR / "survival" / "default.yaml")
@@ -160,6 +167,16 @@ def test_all_yaml_configs_load_cleanly_and_coerce_tuples(tmp_path: Path) -> None
     custom_yaml.write_text("risk_quantiles: [0.25, 0.75]\n", encoding="utf-8")
     loaded = SurvivalConfig.from_yaml(custom_yaml)
     assert loaded.risk_quantiles == (0.25, 0.75)
+
+    bad_tuple_yaml = tmp_path / "bad_tuple.yaml"
+    bad_tuple_yaml.write_text("betas: [0.9]\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="Expected 2 elements"):
+        TFCConfig.from_yaml(bad_tuple_yaml)
+
+    bad_literal_yaml = tmp_path / "bad_literal.yaml"
+    bad_literal_yaml.write_text("consistency_mode: invalid_mode\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="consistency_mode"):
+        TFCConfig.from_yaml(bad_literal_yaml)
 
     bad_yaml = tmp_path / "bad.yaml"
     bad_yaml.write_text("- item1\n- item2\n", encoding="utf-8")

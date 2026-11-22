@@ -8,7 +8,7 @@ log-likelihood.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Literal, Self, override
+from typing import TYPE_CHECKING, Literal, Self, override
 
 import numpy as np
 import torch
@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
 _LOG_RISK_CLIP = 20.0
 _MIN_DENOM_FLOOR = 1e-12
+_MIN_COX_BATCH_SIZE = 2
 
 
 class _DeepSurvNet(nn.Module):
@@ -75,6 +76,11 @@ class DeepSurvModel(BaseSurvivalModel):
         device: str | torch.device = "cpu",
         seed: int = 42,
     ) -> None:
+        if batch_size is not None and batch_size < _MIN_COX_BATCH_SIZE:
+            msg = (
+                f"batch_size must be >= {_MIN_COX_BATCH_SIZE} or None for CoxPH risk-set comparisons, got {batch_size}"
+            )
+            raise ValueError(msg)
         self.hidden_units = hidden_units
         self.activation: Literal["tanh", "relu"] = activation
         self.dropout = dropout
@@ -127,9 +133,7 @@ class DeepSurvModel(BaseSurvivalModel):
         self._baseline_cum_hazard = np.cumsum(increments)
 
     @override
-    def fit(
-        self, x: NDArray[np.floating[Any]], /, *, time: NDArray[np.floating[Any]], event: NDArray[np.bool_]
-    ) -> Self:
+    def fit(self, x: NDArray[np.floating], /, *, time: NDArray[np.floating], event: NDArray[np.bool_]) -> Self:
         seed_everything(self.seed)
         x_scaled = self._scaler.fit_transform(np.asarray(x, dtype=np.float64)).astype(np.float32)
         t_arr = np.asarray(time, dtype=np.float64).reshape(-1)
@@ -176,7 +180,7 @@ class DeepSurvModel(BaseSurvivalModel):
         self._fit_breslow_baseline(train_log_risk, time=t_arr, event=e_arr)
         return self
 
-    def _predict_log_risk(self, x: NDArray[np.floating[Any]], /) -> NDArray[np.float64]:
+    def _predict_log_risk(self, x: NDArray[np.floating], /) -> NDArray[np.float64]:
         if self._net is None:
             msg = "DeepSurvModel must be fitted before calling predict methods"
             raise RuntimeError(msg)
@@ -188,7 +192,7 @@ class DeepSurvModel(BaseSurvivalModel):
 
     @override
     def predict_cumulative_hazard(
-        self, x: NDArray[np.floating[Any]], /, *, times: NDArray[np.floating[Any]] | None = None
+        self, x: NDArray[np.floating], /, *, times: NDArray[np.floating] | None = None
     ) -> NDArray[np.float64]:
         log_risk = self._predict_log_risk(x)
         exp_risk = np.exp(np.clip(log_risk - self._risk_offset, -_LOG_RISK_CLIP, _LOG_RISK_CLIP))
@@ -204,7 +208,7 @@ class DeepSurvModel(BaseSurvivalModel):
 
     @override
     def predict_survival(
-        self, x: NDArray[np.floating[Any]], /, *, times: NDArray[np.floating[Any]] | None = None
+        self, x: NDArray[np.floating], /, *, times: NDArray[np.floating] | None = None
     ) -> NDArray[np.float64]:
         cum_hazard = self.predict_cumulative_hazard(x, times=times)
         return np.asarray(np.exp(-cum_hazard), dtype=np.float64)

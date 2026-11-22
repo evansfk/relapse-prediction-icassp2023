@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Literal, Self
+from typing import TYPE_CHECKING, Literal, Self, assert_never
 
 import numpy as np
 
@@ -19,7 +19,12 @@ def build_survival_mlp(
     *, in_features: int, hidden_units: int, out_features: int, activation: Literal["tanh", "relu"], dropout: float
 ) -> nn.Sequential:
     """Build the Xavier-initialized 1-hidden-layer MLP shared by DeepSurv and Neural MTLR."""
-    act: nn.Module = nn.Tanh() if activation == "tanh" else nn.ReLU()
+    if activation == "tanh":
+        act: nn.Module = nn.Tanh()
+    elif activation == "relu":
+        act = nn.ReLU()
+    else:
+        assert_never(activation)
     fc1 = nn.Linear(in_features, hidden_units)
     fc2 = nn.Linear(hidden_units, out_features)
     for layer in (fc1, fc2):
@@ -42,9 +47,7 @@ class BaseSurvivalModel(ABC):
         """Fitted model time grid ``(J,)`` over which survival and hazard functions are defined."""
 
     @abstractmethod
-    def fit(
-        self, x: NDArray[np.floating[Any]], /, *, time: NDArray[np.floating[Any]], event: NDArray[np.bool_]
-    ) -> Self:
+    def fit(self, x: NDArray[np.floating], /, *, time: NDArray[np.floating], event: NDArray[np.bool_]) -> Self:
         """Fit the survival model on training covariates and right-censored targets.
 
         Args:
@@ -58,7 +61,7 @@ class BaseSurvivalModel(ABC):
 
     @abstractmethod
     def predict_survival(
-        self, x: NDArray[np.floating[Any]], /, *, times: NDArray[np.floating[Any]] | None = None
+        self, x: NDArray[np.floating], /, *, times: NDArray[np.floating] | None = None
     ) -> NDArray[np.float64]:
         """Predict survival probabilities ``S(t | x) = P(T >= t | x)``.
 
@@ -71,7 +74,7 @@ class BaseSurvivalModel(ABC):
         """
 
     def predict_cumulative_hazard(
-        self, x: NDArray[np.floating[Any]], /, *, times: NDArray[np.floating[Any]] | None = None
+        self, x: NDArray[np.floating], /, *, times: NDArray[np.floating] | None = None
     ) -> NDArray[np.float64]:
         """Predict cumulative hazard ``H(t | x) = -log S(t | x)``.
 
@@ -85,7 +88,7 @@ class BaseSurvivalModel(ABC):
         surv = np.clip(self.predict_survival(x, times=times), _SURVIVAL_CLIP_EPS, 1.0)
         return np.asarray(-np.log(surv), dtype=np.float64)
 
-    def predict_risk(self, x: NDArray[np.floating[Any]], /) -> NDArray[np.float64]:
+    def predict_risk(self, x: NDArray[np.floating], /) -> NDArray[np.float64]:
         """Compute scalar risk score ``r(x) = sum_j H(t_j | x)`` (paper Section 3).
 
         Args:

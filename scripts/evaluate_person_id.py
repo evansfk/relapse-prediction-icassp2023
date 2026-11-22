@@ -10,19 +10,24 @@ from __future__ import annotations
 import argparse
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
+import pandas as pd
 import torch
 
 from relapse_prediction.data.synthetic import generate_synthetic_wearable_dataset
 from relapse_prediction.models.minirocket import MiniRocketExtractor
 from relapse_prediction.training.evaluator import run_person_id_evaluation
 
+if TYPE_CHECKING:
+    from numpy.typing import NDArray
+
 
 def parse_args() -> argparse.Namespace:
     """Parse CLI arguments for Person Identification evaluation."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data-dir", type=Path, default=None, help="Directory with dataset.npz.")
+    parser.add_argument("--data-dir", type=Path, default=None, help="Directory with dataset.npz / metadata.csv.")
     parser.add_argument(
         "--embeddings",
         type=Path,
@@ -52,12 +57,29 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     """Evaluate SSL or MiniRocket embeddings on the Person Identification proxy task."""
     args = parse_args()
+    emb_paths: list[Path] | None = args.embeddings
+
     if args.data_dir is not None:
-        loaded = np.load(args.data_dir / "dataset.npz")
-        pretext_x = loaded["pretext_x"]
-        downstream_x = loaded["downstream_x"]
-        user_ids = loaded["downstream_user_ids"]
+        npz_path = args.data_dir / "dataset.npz"
+        meta_path = args.data_dir / "metadata.csv"
+        loaded = np.load(npz_path, allow_pickle=False) if npz_path.exists() else None
+        if loaded is not None and "downstream_user_ids" in loaded:
+            user_ids = loaded["downstream_user_ids"]
+        elif meta_path.exists():
+            user_ids = pd.read_csv(meta_path)["user_id"].astype(str).to_numpy()
+        else:
+            msg = f"Expected downstream_user_ids in {npz_path} or user_id column in {meta_path}"
+            raise FileNotFoundError(msg)
         min_samples = args.min_samples_per_user if args.min_samples_per_user is not None else 100
+        if emb_paths is None:
+            if loaded is None:
+                msg = f"Omitting --embeddings requires {npz_path} with pretext_x and downstream_x"
+                raise FileNotFoundError(msg)
+            pretext_x = loaded["pretext_x"]
+            downstream_x = loaded["downstream_x"]
+        else:
+            pretext_x = np.empty((0, 0, 0), dtype=np.float32)
+            downstream_x = np.empty((0, 0, 0), dtype=np.float32)
     else:
         bundle = generate_synthetic_wearable_dataset(window_hours=4, samples_per_user=30, seed=args.seed)
         pretext_x = bundle.pretext_x
@@ -65,17 +87,17 @@ def main() -> None:
         user_ids = bundle.downstream_user_ids
         min_samples = args.min_samples_per_user if args.min_samples_per_user is not None else 10
 
-    emb_paths: list[Path] | None = args.embeddings
     if emb_paths is not None:
         if len(emb_paths) == 1:
-            emb_input: np.ndarray | list[np.ndarray] = np.load(emb_paths[0])
+            emb_input: NDArray[np.floating] | list[NDArray[np.floating]] = np.asarray(
+                np.load(emb_paths[0]), dtype=np.float32
+            )
             source_name = emb_paths[0].name
         else:
-            emb_input = [np.load(p) for p in emb_paths]
+            emb_input = [np.asarray(np.load(p), dtype=np.float32) for p in emb_paths]
             source_name = f"{len(emb_paths)} per-seed embeddings"
     else:
-        # Fit MiniRocket strictly on unlabeled pretext data (Section 4) with n_splits distinct seeds.
-        emb_list = [
+        emb_list: list[NDArray[np.floating]] = [
             MiniRocketExtractor(num_features=args.minirocket_features, device=args.device, seed=args.seed + i)
             .fit(pretext_x)
             .transform(downstream_x)

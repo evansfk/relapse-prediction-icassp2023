@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 _BINARY_CLASSES = 2
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ClassificationMetrics:
     """Summary metrics for multi-class person identification."""
 
@@ -32,11 +32,11 @@ class ClassificationMetrics:
     macro_auprc: float
     macro_precision: float
     macro_recall: float
-    macro_auroc: float | None = None
+    macro_auroc: float | None
 
 
 def compute_classification_metrics(
-    y_true: NDArray[np.integer[Any]], y_probs: NDArray[np.floating[Any]], /, *, num_classes: int | None = None
+    y_true: NDArray[np.integer], y_probs: NDArray[np.floating], /, *, num_classes: int | None = None
 ) -> ClassificationMetrics:
     """Compute macro-averaged classification metrics matching Table 2 of the paper.
 
@@ -52,6 +52,12 @@ def compute_classification_metrics(
     y_t = np.asarray(y_true, dtype=np.int64).reshape(-1)
     probs = np.asarray(y_probs, dtype=np.float64)
     k = num_classes if num_classes is not None else probs.shape[1]
+    if len(y_t) != len(probs) or probs.shape[1] != k:
+        msg = f"Expected y_probs shape ({len(y_t)}, {k}), got {probs.shape}"
+        raise ValueError(msg)
+    if len(y_t) > 0 and (int(y_t.min()) < 0 or int(y_t.max()) >= k):
+        msg = f"y_true class indices must lie in [0, {k}), got [{y_t.min()}, {y_t.max()}]"
+        raise ValueError(msg)
     y_pred = np.argmax(probs, axis=1)
 
     present_classes = np.unique(y_t)

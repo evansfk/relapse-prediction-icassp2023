@@ -9,7 +9,7 @@ from __future__ import annotations
 import argparse
 
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -32,10 +32,19 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _resolve_window_hours(raw_hours: int, /) -> WindowHours:
+    match raw_hours:
+        case 4 | 8 | 12 as valid_hours:
+            return valid_hours
+        case _:
+            msg = f"window_hours must be 4, 8, or 12, got {raw_hours}"
+            raise ValueError(msg)
+
+
 def main() -> None:
     """Generate and persist a synthetic wearable + survival dataset bundle."""
     args = parse_args()
-    window_hours = cast("WindowHours", args.window_hours)
+    window_hours = _resolve_window_hours(args.window_hours)
     bundle = generate_synthetic_wearable_dataset(
         window_hours=window_hours,
         seq_len=args.seq_len,

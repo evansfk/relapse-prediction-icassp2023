@@ -27,7 +27,7 @@ _MINUTES_PER_HOUR = 60.0
 _RR_BOUNDS_SYNTHETIC = (320.0, 1950.0)
 
 
-@dataclass
+@dataclass(frozen=True, slots=True, kw_only=True)
 class SyntheticWearableDataset:
     """Container holding synthetic pretext and downstream datasets matching Table 1."""
 

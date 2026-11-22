@@ -7,6 +7,8 @@ import pandas as pd
 import pytest
 import torch
 
+from torch.utils.data import DataLoader
+
 from relapse_prediction.config import CHANNEL_NAMES, select_channel_indices
 from relapse_prediction.data.augmentations import (
     JitterTransform,
@@ -18,6 +20,7 @@ from relapse_prediction.data.augmentations import (
     add_frequency,
     remove_frequency,
 )
+from relapse_prediction.data.datasets import TSTCCDataset
 from relapse_prediction.data.preprocessing import (
     append_time_of_day_features,
     build_survival_labels,
@@ -89,6 +92,19 @@ def test_tstcc_and_tfc_augmentation_banks_and_batch_independence() -> None:
     f2 = TFCFrequencyAugmentation(seed=11)(x_f)
     torch.testing.assert_close(f1, f2)
 
+    # Regression CORR-A-H1 / B-H2: multi-worker DataLoader produces distinct augmentations across workers AND epochs.
+    ds = TSTCCDataset(
+        torch.ones(8, 4, 32), jitter_scale_ratio=1.1, scale_loc=1.0, jitter_ratio=0.3, max_seg=6, seed=42
+    )
+    gen = torch.Generator().manual_seed(7)
+    loader = DataLoader(ds, batch_size=2, shuffle=False, num_workers=2, generator=gen)
+    ep1 = torch.cat([w for _, w, _ in loader], dim=0)
+    ep2 = torch.cat([w for _, w, _ in loader], dim=0)
+    # Worker 0 (first batch) and Worker 1 (second batch) must not draw identical random scales:
+    assert not torch.allclose(ep1[:2], ep1[2:4])
+    # Epoch 2 must not replay Epoch 1's exact random draws:
+    assert not torch.allclose(ep1, ep2)
+
 
 def test_cyclical_time_encoding_and_channel_selection() -> None:
     idx = pd.date_range("2022-01-01 00:00:00", periods=24, freq="h", tz="UTC")
@@ -98,6 +114,12 @@ def test_cyclical_time_encoding_and_channel_selection() -> None:
     assert np.isclose(sin_h[0], 0.0, atol=1e-6)
     assert np.isclose(cos_h[0], 1.0, atol=1e-6)
     assert np.isclose(sin_h[6], 1.0, atol=1e-6)
+
+    # Regression B-M3: local circadian wall-clock hour is preserved (midnight local -> sin=0, cos=1).
+    local_idx = pd.date_range("2022-01-01 00:00:00", periods=4, freq="h", tz="Europe/Athens")
+    sin_loc, cos_loc = encode_cyclical_time(local_idx, freq="hour")
+    assert np.isclose(sin_loc[0], 0.0, atol=1e-6)
+    assert np.isclose(cos_loc[0], 1.0, atol=1e-6)
 
     df = pd.DataFrame({"heart_rate": np.full(24, 70.0)}, index=idx)
     enriched = append_time_of_day_features(df)
@@ -147,6 +169,10 @@ def test_clean_wearable_signals_gap_isolation_multirate_rr_and_windowing() -> No
     std_keep_time = standardize_per_sample(windows, exclude_channels=(8, 9))
     np.testing.assert_allclose(std_keep_time[:, :8, :].mean(axis=-1), 0.0, atol=1e-4)
     np.testing.assert_allclose(std_keep_time[:, 8, :] ** 2 + std_keep_time[:, 9, :] ** 2, 1.0, atol=1e-5)
+
+    # Regression B-H1: constant non-zero float32 channel (833.3 ms RR) maps strictly to 0.0, not +/-1.0.
+    const_x = np.full((2, 1, 480), 833.3, dtype=np.float32)
+    np.testing.assert_array_equal(standardize_per_sample(const_x), np.zeros_like(const_x))
 
     # Regression C4: a 10-min gap must NOT be bridged when max_interp_gap_minutes=5.
     gap_df = raw.iloc[:60].copy()

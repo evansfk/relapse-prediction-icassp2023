@@ -30,6 +30,8 @@ if TYPE_CHECKING:
 
     from relapse_prediction.models.base import BaseSSLEncoder
 
+_EXPECTED_NDIM = 3
+
 
 def parse_args() -> argparse.Namespace:
     """Parse CLI arguments for SSL pretraining."""
@@ -47,53 +49,74 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _run_method(args: argparse.Namespace, pretext_x: NDArray[np.float32], /) -> SSLPretrainResult[BaseSSLEncoder]:
-    n_channels, seq_len = pretext_x.shape[1], pretext_x.shape[2]
+def _load_method_config(args: argparse.Namespace, /) -> TFCConfig | TSTCCConfig | MixingUpConfig:
     config_cls: type[TFCConfig | TSTCCConfig | MixingUpConfig] = {
         "tfc": TFCConfig,
         "tstcc": TSTCCConfig,
         "mixing_up": MixingUpConfig,
     }[args.method]
-    cfg = config_cls.from_yaml(args.config) if args.config else config_cls()
-    cfg.input_channels = n_channels
-    cfg.seq_len = seq_len
+    cfg = config_cls.from_yaml(args.config) if args.config is not None else config_cls()
     if args.seed is not None:
         cfg.seed = args.seed
     if args.epochs is not None:
+        if args.epochs < 1:
+            msg = f"--epochs must be >= 1, got {args.epochs}"
+            raise ValueError(msg)
         cfg.epochs = args.epochs
     if args.batch_size is not None:
         cfg.batch_size = args.batch_size
+    return cfg
 
+
+def _run_method(
+    cfg: TFCConfig | TSTCCConfig | MixingUpConfig, pretext_x: NDArray[np.float32], /, *, device: str
+) -> SSLPretrainResult[BaseSSLEncoder]:
+    cfg.input_channels = int(pretext_x.shape[1])
+    cfg.seq_len = int(pretext_x.shape[2])
     if isinstance(cfg, TFCConfig):
-        res_t = pretrain_tfc(pretext_x, cfg, device=args.device)
+        res_t = pretrain_tfc(pretext_x, cfg, device=device)
         return SSLPretrainResult(encoder=res_t.encoder, epoch_losses=res_t.epoch_losses)
     if isinstance(cfg, TSTCCConfig):
-        res_ts = pretrain_tstcc(pretext_x, cfg, device=args.device)
+        res_ts = pretrain_tstcc(pretext_x, cfg, device=device)
         return SSLPretrainResult(encoder=res_ts.encoder, epoch_losses=res_ts.epoch_losses)
-    res_m = pretrain_mixing_up(pretext_x, cfg, device=args.device)
+    res_m = pretrain_mixing_up(pretext_x, cfg, device=device)
     return SSLPretrainResult(encoder=res_m.encoder, epoch_losses=res_m.epoch_losses)
 
 
 def main() -> None:
     """Run SSL pretraining on pretext data and export downstream embeddings."""
     args = parse_args()
+    cfg = _load_method_config(args)
+
     if args.data_dir is not None:
         loaded = np.load(args.data_dir / "dataset.npz")
         pretext_x = loaded["pretext_x"]
         downstream_x = loaded["downstream_x"]
     elif args.synthetic:
-        bundle = generate_synthetic_wearable_dataset(window_hours=4, seed=args.seed or 42)
+        seed = args.seed if args.seed is not None else cfg.seed
+        bundle = generate_synthetic_wearable_dataset(
+            window_hours=4, seq_len=cfg.seq_len, samples_per_user=30, seed=seed
+        )
         pretext_x = bundle.pretext_x
         downstream_x = bundle.downstream_x
     else:
         msg = "Specify either --data-dir <path> or --synthetic"
         raise SystemExit(msg)
 
-    keep_channels = select_channel_indices(args.exclude_groups)
-    pretext_x = pretext_x[:, keep_channels, :]
-    downstream_x = downstream_x[:, keep_channels, :]
+    if (
+        pretext_x.ndim != _EXPECTED_NDIM
+        or downstream_x.ndim != _EXPECTED_NDIM
+        or pretext_x.shape[1:] != downstream_x.shape[1:]
+    ):
+        msg = f"Mismatched pretext_x {pretext_x.shape} and downstream_x {downstream_x.shape} shapes"
+        raise ValueError(msg)
 
-    result = _run_method(args, pretext_x)
+    if args.exclude_groups:
+        keep_channels = select_channel_indices(args.exclude_groups)
+        pretext_x = pretext_x[:, keep_channels, :]
+        downstream_x = downstream_x[:, keep_channels, :]
+
+    result = _run_method(cfg, pretext_x, device=args.device)
     embeddings = extract_embeddings(result.encoder, downstream_x, device=args.device)
 
     out_dir: Path = args.output_dir

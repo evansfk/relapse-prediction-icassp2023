@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 _MIN_CONTRASTIVE_BATCH = 2
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class SSLPretrainResult[E: BaseSSLEncoder]:
     """Typed output of an SSL pretraining run preserving the concrete encoder class."""
 
@@ -37,7 +37,7 @@ class SSLPretrainResult[E: BaseSSLEncoder]:
     epoch_losses: list[float]
 
 
-def _effective_batch_size(requested: int, dataset_len: int, /) -> int:
+def _effective_batch_size(*, requested: int, dataset_len: int) -> int:
     """Compute a valid contrastive batch size (at least 2, at most ``dataset_len``)."""
     if dataset_len < _MIN_CONTRASTIVE_BATCH:
         msg = f"SSL pretraining requires at least {_MIN_CONTRASTIVE_BATCH} samples, got {dataset_len}"
@@ -46,11 +46,7 @@ def _effective_batch_size(requested: int, dataset_len: int, /) -> int:
 
 
 def pretrain_tfc(
-    samples: NDArray[np.floating[Any]] | Tensor,
-    config: TFCConfig | None = None,
-    /,
-    *,
-    device: str | torch.device = "cpu",
+    samples: NDArray[np.floating] | Tensor, config: TFCConfig | None = None, /, *, device: str | torch.device = "cpu"
 ) -> SSLPretrainResult[TFCModel]:
     """Pretrain :class:`TFCModel` with Time-Frequency Consistency loss (Zhang et al., 2022).
 
@@ -84,7 +80,7 @@ def pretrain_tfc(
         freq_add_ratio=cfg.freq_add_ratio,
         seed=cfg.seed,
     )
-    batch_size = _effective_batch_size(cfg.batch_size, len(dataset))
+    batch_size = _effective_batch_size(requested=cfg.batch_size, dataset_len=len(dataset))
     gen = torch.Generator()
     gen.manual_seed(cfg.seed)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True, generator=gen)
@@ -144,11 +140,7 @@ def pretrain_tfc(
 
 
 def pretrain_tstcc(
-    samples: NDArray[np.floating[Any]] | Tensor,
-    config: TSTCCConfig | None = None,
-    /,
-    *,
-    device: str | torch.device = "cpu",
+    samples: NDArray[np.floating] | Tensor, config: TSTCCConfig | None = None, /, *, device: str | torch.device = "cpu"
 ) -> SSLPretrainResult[TSTCCEncoder]:
     """Pretrain :class:`TSTCCEncoder` with Temporal and Contextual Contrasting (Eldele et al., 2021).
 
@@ -175,7 +167,7 @@ def pretrain_tstcc(
         scale_loc=cfg.scale_loc,
         seed=cfg.seed,
     )
-    batch_size = _effective_batch_size(cfg.batch_size, len(dataset))
+    batch_size = _effective_batch_size(requested=cfg.batch_size, dataset_len=len(dataset))
     gen = torch.Generator()
     gen.manual_seed(cfg.seed)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True, generator=gen)
@@ -221,7 +213,7 @@ def pretrain_tstcc(
 
 
 def pretrain_mixing_up(
-    samples: NDArray[np.floating[Any]] | Tensor,
+    samples: NDArray[np.floating] | Tensor,
     config: MixingUpConfig | None = None,
     /,
     *,
@@ -247,7 +239,7 @@ def pretrain_mixing_up(
     rng = np.random.default_rng(cfg.seed)
 
     dataset = WearableTensorDataset(samples)
-    batch_size = _effective_batch_size(cfg.batch_size, len(dataset))
+    batch_size = _effective_batch_size(requested=cfg.batch_size, dataset_len=len(dataset))
     gen = torch.Generator()
     gen.manual_seed(cfg.seed)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True, generator=gen)
@@ -283,7 +275,7 @@ def pretrain_mixing_up(
 @torch.no_grad()
 def extract_embeddings(
     encoder: BaseSSLEncoder,
-    samples: NDArray[np.floating[Any]] | Tensor,
+    samples: NDArray[np.floating] | Tensor,
     /,
     *,
     batch_size: int = 128,

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, override
+from typing import TYPE_CHECKING, override
 
 import torch
 
@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 _EXPECTED_TENSOR_NDIM = 3
 
 
-def _to_float_tensor(samples: NDArray[np.floating[Any]] | Tensor, /) -> Tensor:
+def _to_float_tensor(samples: NDArray[np.floating] | Tensor, /) -> Tensor:
     tensor = (
         samples.detach().clone().float()
         if isinstance(samples, Tensor)
@@ -54,11 +54,7 @@ class WearableTensorDataset(Dataset[tuple[Tensor, Tensor]]):
     """
 
     def __init__(
-        self,
-        samples: NDArray[np.floating[Any]] | Tensor,
-        /,
-        *,
-        labels: NDArray[np.integer[Any]] | Tensor | None = None,
+        self, samples: NDArray[np.floating] | Tensor, /, *, labels: NDArray[np.integer] | Tensor | None = None
     ) -> None:
         self.x = _to_float_tensor(samples)
         if labels is None:
@@ -74,7 +70,7 @@ class WearableTensorDataset(Dataset[tuple[Tensor, Tensor]]):
         return len(self.x)
 
     @override
-    def __getitem__(self, index: int) -> tuple[Tensor, Tensor]:
+    def __getitem__(self, index: int, /) -> tuple[Tensor, Tensor]:
         return self.x[index], self.y[index]
 
 
@@ -92,13 +88,13 @@ class TSTCCDataset(Dataset[tuple[Tensor, Tensor, Tensor]]):
 
     def __init__(
         self,
-        samples: NDArray[np.floating[Any]] | Tensor,
+        samples: NDArray[np.floating] | Tensor,
         /,
         *,
-        jitter_scale_ratio: float = 2.0,
-        jitter_ratio: float = 0.1,
-        max_seg: int = 12,
-        scale_loc: float = 1.0,
+        jitter_scale_ratio: float,
+        jitter_ratio: float,
+        max_seg: int,
+        scale_loc: float,
         seed: int | None = None,
     ) -> None:
         self.x = _to_float_tensor(samples)
@@ -115,7 +111,7 @@ class TSTCCDataset(Dataset[tuple[Tensor, Tensor, Tensor]]):
         return len(self.x)
 
     @override
-    def __getitem__(self, index: int) -> tuple[Tensor, Tensor, Tensor]:
+    def __getitem__(self, index: int, /) -> tuple[Tensor, Tensor, Tensor]:
         x_i = self.x[index]
         weak, strong = self.augment(x_i)
         return x_i, weak, strong
@@ -137,15 +133,15 @@ class TFCDataset(Dataset[tuple[Tensor, Tensor, Tensor, Tensor]]):
 
     def __init__(
         self,
-        samples: NDArray[np.floating[Any]] | Tensor,
+        samples: NDArray[np.floating] | Tensor,
         /,
         *,
-        jitter_ratio: float = 0.3,
-        jitter_scale_ratio: float = 1.1,
-        max_seg: int = 16,
-        scale_loc: float = 1.0,
-        freq_mask_ratio: float = 0.1,
-        freq_add_ratio: float = 0.1,
+        jitter_ratio: float,
+        jitter_scale_ratio: float,
+        max_seg: int,
+        scale_loc: float,
+        freq_mask_ratio: float,
+        freq_add_ratio: float,
         seed: int | None = None,
     ) -> None:
         self.x_t = _to_float_tensor(samples)
@@ -166,7 +162,7 @@ class TFCDataset(Dataset[tuple[Tensor, Tensor, Tensor, Tensor]]):
         return len(self.x_t)
 
     @override
-    def __getitem__(self, index: int) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    def __getitem__(self, index: int, /) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         x_t = self.x_t[index]
         x_f = self.x_f[index]
         return x_t, self.time_aug(x_t), x_f, self.freq_aug(x_f)

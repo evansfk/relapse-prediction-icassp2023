@@ -14,22 +14,21 @@ from __future__ import annotations
 import warnings
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import numpy as np
+import pandas as pd
 
 from sklearn.preprocessing import OneHotEncoder
 
 if TYPE_CHECKING:
-    import pandas as pd
-
     from numpy.typing import NDArray
 
 # Strictly matches Table 3 (+ ps, p_ep, ll): features that change only after an event occurs.
 PAST_EPISODE_COLUMNS: tuple[str, ...] = ("past_episodes", "last_episode_level", "last_episode_psychotic")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class AssembledSurvivalFeatures:
     """Train/test covariate matrices with explicit column names."""
 
@@ -38,10 +37,30 @@ class AssembledSurvivalFeatures:
     feature_names: list[str]
 
 
+def _normalize_static_frame(static_features: pd.DataFrame, /) -> tuple[pd.DataFrame, list[str], list[str]]:
+    """Validate index uniqueness and split static covariates into numeric/boolean vs. categorical."""
+    aligned = static_features.copy()
+    aligned.index = aligned.index.astype(str)
+    if aligned.index.has_duplicates:
+        msg = "static_features index contains duplicate user_id entries"
+        raise ValueError(msg)
+
+    num_cols: list[str] = []
+    cat_cols: list[str] = []
+    for col in aligned.columns:
+        dtype = aligned[col].dtype
+        if pd.api.types.is_numeric_dtype(dtype) or pd.api.types.is_bool_dtype(dtype):
+            aligned[col] = aligned[col].astype("float64")
+            num_cols.append(str(col))
+        else:
+            cat_cols.append(str(col))
+    return aligned, num_cols, cat_cols
+
+
 def assemble_survival_features(
     *,
-    emb_train: NDArray[np.floating[Any]],
-    emb_test: NDArray[np.floating[Any]],
+    emb_train: NDArray[np.floating],
+    emb_test: NDArray[np.floating],
     meta_train: pd.DataFrame,
     meta_test: pd.DataFrame,
     include_user_id: bool = True,
@@ -69,11 +88,16 @@ def assemble_survival_features(
         static_features: Optional DataFrame indexed by ``user_id`` containing static attributes.
         include_static: Concatenate static patient covariates (Table 3: ``+ st``).
         drop_first: Drop first category per one-hot variable (default ``True``, matching
-            ``pd.get_dummies(..., drop_first=True)`` and ``sksurv.OneHotEncoder`` in ``2.0-5.0``).
+            ``pd.get_dummies(..., drop_first=True)`` and ``sksurv.OneHotEncoder`` in ``2.0-5.0``;
+            set ``False`` when evaluating cold-start unseen test users).
 
     Returns:
         :class:`AssembledSurvivalFeatures` containing ``x_train``, ``x_test``, and ``feature_names``.
     """
+    if include_static and static_features is None:
+        msg = "include_static=True requires a non-None static_features DataFrame"
+        raise ValueError(msg)
+
     train_blocks: list[NDArray[np.float64]] = [np.asarray(emb_train, dtype=np.float64)]
     test_blocks: list[NDArray[np.float64]] = [np.asarray(emb_test, dtype=np.float64)]
     names: list[str] = [f"emb_{i}" for i in range(train_blocks[0].shape[1])]
@@ -93,20 +117,19 @@ def assemble_survival_features(
     if include_event_free_days:
         past_cols.append("event_free_days")
 
-    present_past = [col for col in past_cols if col in meta_train.columns and col in meta_test.columns]
-    if present_past:
-        train_blocks.append(meta_train[present_past].to_numpy(dtype=np.float64))
-        test_blocks.append(meta_test[present_past].to_numpy(dtype=np.float64))
-        names.extend(present_past)
+    if past_cols:
+        missing_past = [col for col in past_cols if col not in meta_train.columns or col not in meta_test.columns]
+        if missing_past:
+            msg = f"Missing requested past-episode metadata columns: {missing_past}"
+            raise ValueError(msg)
+        train_blocks.append(meta_train[past_cols].fillna(0.0).to_numpy(dtype=np.float64))
+        test_blocks.append(meta_test[past_cols].fillna(0.0).to_numpy(dtype=np.float64))
+        names.extend(past_cols)
 
     if include_static and static_features is not None:
-        aligned_static = static_features.copy()
-        aligned_static.index = aligned_static.index.astype(str)
+        aligned_static, num_cols, cat_cols = _normalize_static_frame(static_features)
         st_tr = aligned_static.reindex(meta_train["user_id"].astype(str)).reset_index(drop=True)
         st_te = aligned_static.reindex(meta_test["user_id"].astype(str)).reset_index(drop=True)
-
-        num_cols = list(st_tr.select_dtypes(include=[np.number, "bool"]).columns)
-        cat_cols = [c for c in st_tr.columns if c not in num_cols]
 
         if num_cols:
             medians = st_tr[num_cols].median()

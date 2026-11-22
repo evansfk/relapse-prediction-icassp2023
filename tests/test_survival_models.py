@@ -8,6 +8,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from sksurv.ensemble import ExtraSurvivalTrees
+
 from relapse_prediction.evaluation.classification import compute_classification_metrics
 from relapse_prediction.evaluation.survival_metrics import (
     _valid_eval_times,
@@ -15,6 +17,7 @@ from relapse_prediction.evaluation.survival_metrics import (
     compute_ibs_and_brier,
     evaluate_survival_model,
     stratify_risk_groups,
+    to_structured_survival,
 )
 from relapse_prediction.models.linear_probe import train_linear_probe
 from relapse_prediction.survival.deepsurv import DeepSurvModel
@@ -124,7 +127,7 @@ def test_c_index_valid_eval_times_and_risk_stratification() -> None:
     # Regression C8: _valid_eval_times fallback respects training time upper bound.
     t_tr = np.array([5.0, 10.0, 15.0, 20.0])
     t_te = np.array([19.5, 25.0, 30.0])
-    grid = _valid_eval_times(t_tr, t_te, num_points=10)
+    grid = _valid_eval_times(t_tr, t_te, num_points=10, ibs_mode="paper")
     assert float(grid.min()) > float(t_tr.min())
     assert float(grid.max()) < float(t_tr.max())
 
@@ -187,7 +190,12 @@ def test_assemble_survival_features_table3_strict_and_edge_cases() -> None:
         }
     )
     static_df = pd.DataFrame(
-        {"age": [25.0, 34.0, 41.0], "all_nan_col": [np.nan, np.nan, np.nan], "diagnosis": ["A", "B", "A"]},
+        {
+            "age": [25.0, 34.0, 41.0],
+            "all_nan_col": [np.nan, np.nan, np.nan],
+            "diagnosis": ["A", "B", "A"],
+            "smoker": pd.Series([True, False, True], index=["0", "1", "2"], dtype="boolean"),
+        },
         index=pd.Index(["0", "1", "2"], name="user_id"),
     )
 
@@ -230,7 +238,7 @@ def test_compute_ibs_handles_test_times_exceeding_max_train_time() -> None:
     # Test contains an uncensored event strictly beyond max(t_tr) = 50.0.
     t_te = np.array([8.0, 15.0, 30.0, 65.0])
     e_te = np.array([True, False, True, True])
-    eval_t = _valid_eval_times(t_tr, t_te, num_points=10)
+    eval_t = _valid_eval_times(t_tr, t_te, num_points=10, ibs_mode="paper")
     surv_probs = np.full((len(t_te), len(eval_t)), 0.5, dtype=np.float64)
 
     ibs, neg_log_ibs, curve = compute_ibs_and_brier(
@@ -244,3 +252,33 @@ def test_compute_ibs_handles_test_times_exceeding_max_train_time() -> None:
     assert 0.0 < ibs < 1.0
     assert np.isfinite(neg_log_ibs)
     assert curve.shape == eval_t.shape
+
+    # Regression B-H5: all-censored test split and administrative tail censoring succeed without sksurv crash.
+    ibs_cens, _, curve_cens = compute_ibs_and_brier(
+        time_train=t_tr,
+        event_train=e_tr,
+        time_test=np.array([12.0, 25.0, 55.0, 70.0]),
+        event_test=np.array([False, False, False, False]),
+        survival_probs=surv_probs,
+        eval_times=eval_t,
+    )
+    assert 0.0 < ibs_cens < 1.0
+    assert np.isfinite(curve_cens).all()
+
+    # Regression CORR-A-H2: forest predict_risk matches scikit-survival estimator.predict (event-only CHF sum).
+    x_f, t_f, e_f = _make_correlated_survival_data(n=80, d=6, seed=11)
+    est = ExtraSurvivalTreesModel(n_estimators=25, max_depth=4, min_samples_leaf=3, n_jobs=1, seed=11).fit(
+        x_f[:50], time=t_f[:50], event=e_f[:50]
+    )
+    ref_est = ExtraSurvivalTrees(
+        n_estimators=25,
+        max_depth=4,
+        min_samples_split=6,
+        min_samples_leaf=3,
+        max_features="sqrt",
+        bootstrap=True,
+        max_samples=0.63,
+        n_jobs=1,
+        random_state=11,
+    ).fit(x_f[:50].astype(np.float64), to_structured_survival(time=t_f[:50], event=e_f[:50]))
+    np.testing.assert_allclose(est.predict_risk(x_f[50:]), ref_est.predict(x_f[50:].astype(np.float64)))

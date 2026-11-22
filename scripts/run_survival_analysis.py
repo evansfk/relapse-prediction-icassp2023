@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import matplotlib as mpl
 
@@ -123,7 +123,7 @@ def _export_survival_figures(
     benchmark: SurvivalBenchmarkResult,
     metadata: pd.DataFrame,
     relapses_df: pd.DataFrame | None,
-    time_days: NDArray[np.floating[Any]],
+    time_days: NDArray[np.floating],
     event: NDArray[np.bool_],
     test_risk: NDArray[np.float64],
     risk_tiers: NDArray[np.str_],
@@ -171,13 +171,15 @@ def _export_survival_figures(
 def main() -> None:
     """Run downstream survival benchmark and print 3-tier risk stratification summary."""
     args = parse_args()
+    default_cfg_path = Path("configs/survival/default.yaml")
+    if args.config != default_cfg_path and not args.config.exists():
+        msg = f"Survival config file not found: {args.config}"
+        raise FileNotFoundError(msg)
     cfg = SurvivalConfig.from_yaml(args.config) if args.config.exists() else SurvivalConfig()
     cfg = _apply_cli_overrides(cfg, args)
 
     if args.data_dir is not None:
         loaded = np.load(args.data_dir / "dataset.npz")
-        pretext_x = loaded["pretext_x"]
-        downstream_x = loaded["downstream_x"]
         event = loaded["event"]
         time_days = loaded["time_days"]
         metadata = pd.read_csv(args.data_dir / "metadata.csv")
@@ -185,6 +187,8 @@ def main() -> None:
         static_df = pd.read_csv(static_path, index_col="user_id") if static_path.exists() else None
         relapses_path = args.data_dir / "relapse_episodes.csv"
         relapses_df = pd.read_csv(relapses_path) if relapses_path.exists() else None
+        pretext_x = loaded["pretext_x"] if args.embeddings is None else np.empty((0, 0, 0), dtype=np.float32)
+        downstream_x = loaded["downstream_x"] if args.embeddings is None else np.empty((0, 0, 0), dtype=np.float32)
     else:
         bundle = generate_synthetic_wearable_dataset(window_hours=4, samples_per_user=30, seed=cfg.seed)
         pretext_x = bundle.pretext_x
@@ -196,12 +200,12 @@ def main() -> None:
         relapses_df = bundle.relapse_episodes
 
     if args.embeddings is not None:
-        embeddings = np.load(args.embeddings)
+        embeddings = np.asarray(np.load(args.embeddings), dtype=np.float32)
         emb_name = args.embedding_name
     else:
         # Fit MiniRocket strictly on unlabeled pretext cohort (zero downstream test leakage).
         embeddings = (
-            MiniRocketExtractor(num_features=args.minirocket_features, seed=cfg.seed)
+            MiniRocketExtractor(num_features=args.minirocket_features, device=args.device, seed=cfg.seed)
             .fit(pretext_x)
             .transform(downstream_x)
         )

@@ -9,7 +9,7 @@ be passed directly to these functions.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
@@ -24,6 +24,7 @@ SEVERITY_MAP: dict[str, int] = {"low": 1, "moderate": 2, "severe": 3}
 _MINUTES_PER_HOUR = 60
 _SECONDS_PER_DAY = 86400.0
 _MIN_SURVIVAL_DAYS = 1e-3
+_EXPECTED_NDIM = 3
 
 _SURVIVAL_META_COLUMNS: tuple[str, ...] = (
     "orig_idx",
@@ -49,7 +50,11 @@ _FREQ_PERIODS: dict[str, float] = {
 
 
 def encode_cyclical_time(
-    timestamps: pd.Series[Any] | pd.DatetimeIndex, /, *, freq: str = "hour", fractional_hour: bool = False
+    timestamps: pd.DatetimeIndex | Sequence[str | pd.Timestamp],
+    /,
+    *,
+    freq: str = "hour",
+    fractional_hour: bool = False,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     """Encode timestamps into cyclical sine and cosine features.
 
@@ -57,7 +62,7 @@ def encode_cyclical_time(
     ``x_sin = sin(2 * pi * hour / 24)`` and ``x_cos = cos(2 * pi * hour / 24)``.
 
     Args:
-        timestamps: Datetime-like Series or DatetimeIndex.
+        timestamps: Datetime-like sequence or DatetimeIndex.
         freq: One of ``"hour"``, ``"day"``, ``"dayofweek"``, ``"dayofyear"``, ``"month"``, ``"year"``.
         fractional_hour: If ``True`` and ``freq == "hour"``, include fractional minutes
             (``hour + minute / 60``); defaults to ``False`` matching ``time_encoding.py``.
@@ -72,25 +77,24 @@ def encode_cyclical_time(
         msg = f"Unsupported frequency {freq!r}; expected one of {sorted(_FREQ_PERIODS)}"
         raise ValueError(msg)
 
-    dt = pd.to_datetime(timestamps, utc=True)
-    dt_series = dt.to_series() if isinstance(dt, pd.DatetimeIndex) else dt
+    dt_idx = timestamps if isinstance(timestamps, pd.DatetimeIndex) else pd.DatetimeIndex(list(timestamps))
 
     values: NDArray[np.float64]
     if freq == "hour":
-        values = np.asarray(dt_series.dt.hour, dtype=np.float64)
+        values = np.asarray(dt_idx.hour, dtype=np.float64)
         if fractional_hour:
-            values = values + np.asarray(dt_series.dt.minute, dtype=np.float64) / float(_MINUTES_PER_HOUR)
+            values = values + np.asarray(dt_idx.minute, dtype=np.float64) / float(_MINUTES_PER_HOUR)
     elif freq == "day":
-        values = np.asarray(dt_series.dt.day - 1, dtype=np.float64)
+        values = np.asarray(dt_idx.day - 1, dtype=np.float64)
     elif freq == "dayofweek":
-        values = np.asarray(dt_series.dt.dayofweek, dtype=np.float64)
+        values = np.asarray(dt_idx.dayofweek, dtype=np.float64)
     elif freq == "dayofyear":
-        values = np.asarray(dt_series.dt.dayofyear - 1, dtype=np.float64)
+        values = np.asarray(dt_idx.dayofyear - 1, dtype=np.float64)
     elif freq == "month":
-        values = np.asarray(dt_series.dt.month - 1, dtype=np.float64)
+        values = np.asarray(dt_idx.month - 1, dtype=np.float64)
     else:
         decade = _FREQ_PERIODS["year"]
-        years = np.asarray(dt_series.dt.year, dtype=np.float64)
+        years = np.asarray(dt_idx.year, dtype=np.float64)
         values = years - (years // decade) * decade
 
     angle = (values / _FREQ_PERIODS[freq]) * 2.0 * np.pi
@@ -218,7 +222,8 @@ def clean_wearable_signals(
         valid_min_per_hour = one_min_valid.groupby(hr_buckets).sum()
         invalid_hours = pd.DatetimeIndex(valid_min_per_hour[valid_min_per_hour < min_valid_minutes_per_hour].index)
 
-    resampled = cleaned.resample(f"{resample_minutes}min").mean()
+    num_cols = list(cleaned.select_dtypes(include=[np.number]).columns)
+    resampled = cleaned[num_cols].resample(f"{resample_minutes}min").mean()
     max_gap_steps = max_interp_gap_minutes // max(resample_minutes, 1)
     resampled = _interpolate_short_interior_gaps(resampled, max_gap_steps=max_gap_steps)
 
@@ -251,8 +256,13 @@ def extract_consecutive_windows(
         msg = "Input DataFrame must have a DatetimeIndex"
         raise TypeError(msg)
 
-    window_len = (window_hours * _MINUTES_PER_HOUR) // resample_minutes
-    feature_df = append_time_of_day_features(df, freqs=("hour",)) if add_time_encoding else df
+    window_len = (window_hours * _MINUTES_PER_HOUR) // max(resample_minutes, 1)
+    if window_len < 1 or resample_minutes < 1:
+        msg = f"Invalid window_hours={window_hours}, resample_minutes={resample_minutes}"
+        raise ValueError(msg)
+
+    sorted_df = df.sort_index()
+    feature_df = append_time_of_day_features(sorted_df, freqs=("hour",)) if add_time_encoding else sorted_df
 
     is_missing = feature_df.isna().any(axis=1)
     expected_step = pd.Timedelta(minutes=resample_minutes)
@@ -280,7 +290,7 @@ def extract_consecutive_windows(
 
 
 def standardize_per_sample(
-    x: NDArray[np.floating[Any]], /, *, eps: float = 1e-8, exclude_channels: Sequence[int] = ()
+    x: NDArray[np.floating], /, *, eps: float = 1e-8, exclude_channels: Sequence[int] = ()
 ) -> NDArray[np.float32]:
     """Apply per-sample, per-channel zero-mean unit-variance standardization.
 
@@ -296,20 +306,21 @@ def standardize_per_sample(
     Returns:
         Standardized ``float32`` array of shape ``(S, C, L)``.
     """
-    arr = np.asarray(x, dtype=np.float32)
-    mean = arr.mean(axis=-1, keepdims=True)
-    std = arr.std(axis=-1, keepdims=True)
-    safe_std = np.where(std < eps, np.float32(1.0), std)
-    standardized: NDArray[np.float32] = np.asarray((arr - mean) / safe_std, dtype=np.float32)
+    arr64 = np.asarray(x, dtype=np.float64)
+    if arr64.ndim != _EXPECTED_NDIM:
+        msg = f"Expected 3D array (S, C, L), got shape {arr64.shape}"
+        raise ValueError(msg)
+    mean = arr64.mean(axis=-1, keepdims=True)
+    std = arr64.std(axis=-1, keepdims=True)
+    centered = np.where(std <= eps, 0.0, (arr64 - mean) / np.where(std <= eps, 1.0, std))
+    standardized: NDArray[np.float32] = np.asarray(centered, dtype=np.float32)
     if exclude_channels:
-        out = standardized.copy()
         idx = list(exclude_channels)
-        out[:, idx, :] = arr[:, idx, :]
-        return out
+        standardized[:, idx, :] = np.asarray(x, dtype=np.float32)[:, idx, :]
     return standardized
 
 
-def _parse_psychotic_flag(raw: object) -> int:
+def _parse_psychotic_flag(raw: object, /) -> int:
     """Encode past-episode psychotic indicator as ``1`` (depressive) or ``2`` (psychotic)."""
     if raw is None or (isinstance(raw, float) and np.isnan(raw)):
         return 1
@@ -323,7 +334,7 @@ def _parse_psychotic_flag(raw: object) -> int:
     return 1
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class SurvivalLabelResult:
     """Structured output of right-censored survival labeling."""
 
@@ -333,8 +344,44 @@ class SurvivalLabelResult:
     metadata: pd.DataFrame
 
 
+def _strip_tz_if_mismatched(
+    records_ts: pd.Series, eps_start: pd.Series, eps_end: pd.Series, /
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """Align timezone awareness between sample timestamps and relapse intervals."""
+    rec_tz = records_ts.dt.tz
+    ep_tz = eps_start.dt.tz
+    if (rec_tz is None) != (ep_tz is None):
+        r_out = records_ts.dt.tz_localize(None) if rec_tz is not None else records_ts
+        s_out = eps_start.dt.tz_localize(None) if ep_tz is not None else eps_start
+        e_out = eps_end.dt.tz_localize(None) if eps_end.dt.tz is not None else eps_end
+        return r_out, s_out, e_out
+    return records_ts, eps_start, eps_end
+
+
+def _normalize_survival_inputs(
+    sample_records: pd.DataFrame, relapse_episodes: pd.DataFrame, /
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Copy and normalize user IDs, timestamps, and timezone alignment for survival labeling."""
+    records = sample_records.copy()
+    records["orig_idx"] = np.arange(len(records), dtype=np.int64)
+    records["timestamp"] = pd.to_datetime(records["timestamp"])
+    records["_uid_key"] = records["user_id"].astype(str)
+
+    episodes = relapse_episodes.copy()
+    episodes["start"] = pd.to_datetime(episodes["start"])
+    episodes["end"] = pd.to_datetime(episodes["end"])
+    episodes["_uid_key"] = episodes["user_id"].astype(str)
+    records["timestamp"], episodes["start"], episodes["end"] = _strip_tz_if_mismatched(
+        records["timestamp"], episodes["start"], episodes["end"]
+    )
+    if bool((episodes["end"] < episodes["start"]).any()):
+        msg = "relapse_episodes contains intervals with end < start"
+        raise ValueError(msg)
+    return records, episodes
+
+
 def build_survival_labels(
-    sample_records: pd.DataFrame, relapse_episodes: pd.DataFrame, /, *, window_hours: float = 0.0
+    sample_records: pd.DataFrame, relapse_episodes: pd.DataFrame, /, *, window_hours: float
 ) -> SurvivalLabelResult:
     """Compute right-censored time-to-relapse labels matching ``load_survival_data.py``.
 
@@ -363,19 +410,18 @@ def build_survival_labels(
         :class:`SurvivalLabelResult` containing kept indices, event flags, survival times,
         and an enriched metadata DataFrame including past-episode history features.
     """
-    records = sample_records.copy()
-    records["orig_idx"] = np.arange(len(records), dtype=np.int64)
-    records["timestamp"] = pd.to_datetime(records["timestamp"])
+    if window_hours < 0:
+        msg = f"window_hours must be non-negative, got {window_hours}"
+        raise ValueError(msg)
 
-    episodes = relapse_episodes.copy()
-    episodes["start"] = pd.to_datetime(episodes["start"])
-    episodes["end"] = pd.to_datetime(episodes["end"])
+    records, episodes = _normalize_survival_inputs(sample_records, relapse_episodes)
 
     window_delta = pd.Timedelta(hours=window_hours)
     rows: list[dict[str, object]] = []
 
-    for user_id, user_samples in records.groupby("user_id", sort=False):
-        user_eps = episodes[episodes["user_id"] == user_id].sort_values("start")
+    for uid_key, user_samples in records.groupby("_uid_key", sort=False):
+        user_id = user_samples["user_id"].iloc[0]
+        user_eps = episodes[episodes["_uid_key"] == uid_key].sort_values("start")
         if user_eps.empty:
             continue
 
